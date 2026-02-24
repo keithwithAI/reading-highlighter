@@ -3,9 +3,8 @@
 	"name": "Reading Highlighter",
 	"version": "1.5.0",
 	"minAppVersion": "1.0.0",
-	"description": "Highlight selected text in reading mode using ==markdown highlight== syntax.",
+	"description": "Highlight selected text in reading mode using markdown highlight syntax.",
 	"author": "Tintalectronico",
 	"authorUrl": "https://alexochoa.es",
-	"isDesktopOnly": false,
-	"main": "main.js"
+	"isDesktopOnly": false
 }
