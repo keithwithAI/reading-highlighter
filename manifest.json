@@ -6,6 +6,5 @@
 	"description": "Highlight selected text in reading mode using markdown highlight syntax.",
 	"author": "Tintalectronico",
 	"authorUrl": "https://alexochoa.es",
-	"isDesktopOnly": false,
-	"main": "main.js"
+	"isDesktopOnly": false
 }
