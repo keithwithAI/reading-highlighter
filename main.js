@@ -6,10 +6,10 @@ class ReadingHighlighterPlugin extends Plugin {
   boundHandleSelectionChange = null;
 
   onload() {
-    /*── Comando en la paleta ──*/
+    /*── Command palette ──*/
     this.addCommand({
       id: "highlight-selection-reading",
-      name: "Subrayar selección en modo lectura",
+      name: "Highlight selection in reading mode",
       checkCallback: (checking) => {
         const view = this.app.workspace.getActiveViewOfType(MarkdownView);
         if (!view || view.getMode() !== "preview") return false;
@@ -19,7 +19,7 @@ class ReadingHighlighterPlugin extends Plugin {
       },
     });
 
-    /*── Atajo escritorio ──*/
+    /*── Desktop shortcut ──*/
     this.registerDomEvent(document, "keydown", (evt) => {
       if (evt.shiftKey && evt.key === "H") {
         // Don't trigger when typing in inputs, textareas, or contenteditable elements
@@ -34,33 +34,33 @@ class ReadingHighlighterPlugin extends Plugin {
       }
     });
 
-    /*── Icono ribbon (solo móvil) ──*/
+    /*── Ribbon icon (mobile only) ──*/
     if (Platform.isMobile) {
-      const btn = this.addRibbonIcon("highlighter", "Subrayar selección", () => {
+      const btn = this.addRibbonIcon("highlighter", "Highlight selection", () => {
         const view = this.app.workspace.getActiveViewOfType(MarkdownView);
         if (view && view.getMode() === "preview") this.highlightSelection(view);
-        else new Notice("Abre la nota en modo lectura primero.");
+        else new Notice("Open the note in reading mode first.");
       });
       this.register(() => btn.remove());
     }
 
-    /*── Lógica del Botón Flotante ──*/
+    /*── Floating button logic ──*/
     this.createFloatingButton();
     this.boundHandleSelectionChange = this.handleSelectionChange.bind(this);
     this.registerDomEvent(document, "selectionchange", this.boundHandleSelectionChange);
 
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", () => {
-        // Asegurar que el estado del botón se actualiza cuando cambia la hoja activa
+        // Update button state when the active leaf changes
         this.handleSelectionChange();
       })
     );
-    // Comprobación inicial por si existe una selección cuando el plugin se carga
+    // Initial check in case a selection exists when the plugin loads
     this.handleSelectionChange();
   }
 
   onunload() {
-    // Obsidian desregistra automáticamente los eventos de registerDomEvent y registerEvent
+    // Obsidian automatically unregisters registerDomEvent and registerEvent listeners
     if (this.floatingButtonEl) {
       this.floatingButtonEl.remove();
       this.floatingButtonEl = null;
@@ -71,16 +71,16 @@ class ReadingHighlighterPlugin extends Plugin {
     if (this.floatingButtonEl) return;
 
     this.floatingButtonEl = document.createElement("button");
-    setIcon(this.floatingButtonEl, "highlighter"); // Usar un icono
-    this.floatingButtonEl.setAttribute("aria-label", "Subrayar selección");
+    setIcon(this.floatingButtonEl, "highlighter");
+    this.floatingButtonEl.setAttribute("aria-label", "Highlight selection");
     this.floatingButtonEl.addClass("reading-highlighter-float-btn");
 
-    // Estilos básicos (considera moverlos a styles.css para una mejor gestión)
+    // Basic styles (consider moving to styles.css for better maintainability)
     this.floatingButtonEl.style.position = "fixed";
-    this.floatingButtonEl.style.bottom = "30px"; // Ajusta según sea necesario
+    this.floatingButtonEl.style.bottom = "30px";
     this.floatingButtonEl.style.left = "50%";
     this.floatingButtonEl.style.transform = "translateX(-50%)";
-    this.floatingButtonEl.style.zIndex = "1000"; // Alto z-index para estar por encima
+    this.floatingButtonEl.style.zIndex = "1000";
     this.floatingButtonEl.style.padding = "10px 15px";
     this.floatingButtonEl.style.border = "none";
     this.floatingButtonEl.style.borderRadius = "8px";
@@ -88,14 +88,14 @@ class ReadingHighlighterPlugin extends Plugin {
     this.floatingButtonEl.style.boxShadow = "0 4px 8px rgba(0,0,0,0.2)";
     this.floatingButtonEl.style.backgroundColor = "var(--interactive-accent)";
     this.floatingButtonEl.style.color = "var(--text-on-accent)";
-    this.floatingButtonEl.style.display = "none"; // Inicialmente oculto
+    this.floatingButtonEl.style.display = "none"; // Initially hidden
 
     this.registerDomEvent(this.floatingButtonEl, "click", () => {
       const view = this.app.workspace.getActiveViewOfType(MarkdownView);
       if (view && view.getMode() === "preview") {
         this.highlightSelection(view);
       }
-      this.hideFloatingButton(); // Ocultar después del clic
+      this.hideFloatingButton(); // Hide after click
     });
 
     document.body.appendChild(this.floatingButtonEl);
@@ -138,23 +138,23 @@ class ReadingHighlighterPlugin extends Plugin {
     }
   }
 
-  /*───────────────── Lógica principal ─────────────────*/
+  /*───────────────── Main logic ─────────────────*/
   async highlightSelection(view) {
     const sel = document.getSelection();
     const snippet = sel?.toString() ?? "";
     if (!snippet.trim()) {
-      new Notice("Selecciona texto primero — nada elegido.");
+      new Notice("Select text first — nothing selected.");
       return;
     }
 
-    /* 1. Guardar posición de scroll */
+    /* 1. Save scroll position */
     const scrollBefore = this.getScroll(view);
 
-    /* 2. Leer archivo */
+    /* 2. Read file */
     const file = view.file;
     const raw = await this.app.vault.read(file);
 
-    /* 3. Localizar la selección */
+    /* 3. Locate the selection */
     let a_orig, b_orig; // Use temporary variables for original positions
     const a1 = this.posViaSourcePos(sel?.anchorNode);
     const b1 = this.posViaSourcePos(sel?.focusNode);
@@ -164,14 +164,14 @@ class ReadingHighlighterPlugin extends Plugin {
     } else {
       const pos_fallback = this.findMatchWithLinks(raw, snippet);
       if (pos_fallback[0] == null || pos_fallback[1] == null) {
-        new Notice("Imposible ubicar la selección en el archivo.");
+        new Notice("Unable to locate the selection in the file.");
         return;
       }
       [a_orig, b_orig] = pos_fallback;
     }
 
     if (a_orig == null || b_orig == null) {
-      new Notice("Imposible ubicar la selección en el archivo.");
+      new Notice("Unable to locate the selection in the file.");
       return;
     }
 
@@ -195,16 +195,16 @@ class ReadingHighlighterPlugin extends Plugin {
         }
     }
 
-    /* 4. Procesar el texto seleccionado por párrafos */
+    /* 4. Process the selected text by paragraphs */
     // Use the potentially modified textToHighlight
     const updatedText = this.addHighlightsByParagraph(textToHighlight);
 
-    /* 5. Reemplazar en el archivo */
+    /* 5. Replace in file */
     // Use the adjusted 'currentA' and original 'currentB' (or b_orig)
     const updated = raw.slice(0, currentA) + updatedText + raw.slice(currentB);
     await this.app.vault.modify(file, updated);
 
-    /* 6. Restaurar scroll (doble pasada) */
+    /* 6. Restore scroll (double pass) */
     const restore = () => this.applyScroll(view, scrollBefore);
     requestAnimationFrame(() => {
       restore();
@@ -214,7 +214,7 @@ class ReadingHighlighterPlugin extends Plugin {
     sel?.removeAllRanges();
   }
 
-  /*────────── Añadir subrayado por párrafos ──────────*/
+  /*────────── Add highlights by paragraph ──────────*/
   addHighlightsByParagraph(text) {
     // Split into paragraphs while preserving the exact separators (blank lines
     // may contain whitespace) so the file content isn't silently modified.
@@ -246,9 +246,9 @@ class ReadingHighlighterPlugin extends Plugin {
     }).join('');
   }
 
-  /*────────── Añadir subrayado a una línea individual ──────────*/
+  /*────────── Add highlight to a single line ──────────*/
   addHighlightToLine(line) {
-    // Preservar espacios iniciales
+    // Preserve leading whitespace
     const leadingSpaces = line.match(/^(\s*)/)[1];
     const trimmedLine = line.trim();
 
@@ -299,7 +299,7 @@ class ReadingHighlighterPlugin extends Plugin {
     if (el) el.scrollTop = y;
   }
 
-  /*────────── Posición helpers ──────────*/
+  /*────────── Position helpers ──────────*/
   posViaSourcePos(node) {
     if (!node) return null;
     let el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
@@ -340,28 +340,28 @@ class ReadingHighlighterPlugin extends Plugin {
   }
 
 
-  /*────────── Nueva búsqueda con enlaces mejorada ──────────*/
+  /*────────── Enhanced search with link handling ──────────*/
   findMatchWithLinks(source, snippet) {
-    /* A. Buscar coincidencia directa única */
+    /* A. Find unique direct match */
     const direct = this.uniqueDirectMatch(source, snippet);
     if (direct[0] != null) return direct;
 
-    /* B. Crear mapa de posiciones y buscar en texto renderizado */
+    /* B. Create position map and search in rendered text */
     const positionMap = this.createPositionMap(source);
     const rendered = positionMap.renderedText;
 
-    // Buscar en el texto renderizado
+    // Search in rendered text
     const renderedMatch = this.findBestMatch(rendered, snippet);
     if (renderedMatch[0] != null) {
-      // Convertir posiciones del texto renderizado de vuelta al markdown
+      // Convert rendered text positions back to markdown source
       return this.mapRenderedPositionsToSource(positionMap, renderedMatch);
     }
 
-    /* C. Búsqueda flexible como fallback */
+    /* C. Flexible search as fallback */
     return this.findFlexibleMatch(source, snippet);
   }
 
-  /*────────── Crear mapa de posiciones ──────────*/
+  /*────────── Create position map ──────────*/
   createPositionMap(source) {
     const map = [];
     let renderedText = '';
@@ -370,14 +370,14 @@ class ReadingHighlighterPlugin extends Plugin {
     while (sourcePos < source.length) {
       const char = source[sourcePos];
 
-      // Detectar enlaces markdown [texto](url)
+      // Detect markdown links [text](url)
       if (char === '[') {
         const mdLinkMatch = source.slice(sourcePos).match(/^\[([^\]]+)\]\([^)]*\)/);
         if (mdLinkMatch) {
           const fullMatch = mdLinkMatch[0];
           const linkText = mdLinkMatch[1];
 
-          // Mapear cada carácter del texto del enlace
+          // Map each character of the link text
           for (let i = 0; i < linkText.length; i++) {
             map.push({
               sourceStart: sourcePos,
@@ -393,13 +393,13 @@ class ReadingHighlighterPlugin extends Plugin {
           continue;
         }
 
-        // Detectar wikilinks [[link|texto]] o [[link]]
+        // Detect wikilinks [[link|text]] or [[link]]
         const wikiLinkMatch = source.slice(sourcePos).match(/^\[\[([^\]|]*?)(?:\|([^\]]*?))?\]\]/);
         if (wikiLinkMatch) {
           const fullMatch = wikiLinkMatch[0];
           const displayText = wikiLinkMatch[2] || wikiLinkMatch[1];
 
-          // Mapear cada carácter del texto mostrado
+          // Map each character of the display text
           for (let i = 0; i < displayText.length; i++) {
             map.push({
               sourceStart: sourcePos,
@@ -416,11 +416,11 @@ class ReadingHighlighterPlugin extends Plugin {
         }
       }
 
-      // Detectar otros elementos markdown comunes
+      // Detect other common markdown formatting
       if (char === '*' || char === '_' || char === '=' || char === '`' || char === '~') {
         const formatting = this.detectFormatting(source, sourcePos);
         if (formatting) {
-          // Mapear el contenido sin el formato
+          // Map the content without formatting delimiters
           for (let i = 0; i < formatting.content.length; i++) {
             map.push({
               sourceStart: sourcePos + formatting.startOffset,
@@ -437,7 +437,7 @@ class ReadingHighlighterPlugin extends Plugin {
         }
       }
 
-      // Carácter normal
+      // Normal character
       map.push({
         sourceStart: sourcePos,
         sourceEnd: sourcePos + 1,
@@ -453,13 +453,13 @@ class ReadingHighlighterPlugin extends Plugin {
     return { renderedText, map };
   }
 
-  /*────────── Detectar formato markdown ──────────*/
+  /*────────── Detect markdown formatting ──────────*/
   detectFormatting(source, pos) {
     const remaining = source.slice(pos);
 
     // Order matters: check longer delimiters before shorter ones.
 
-    // Bold Italic ***texto*** or ___texto___
+    // Bold Italic ***text*** or ___text___
     const boldItalicAst = remaining.match(/^\*\*\*(.*?)\*\*\*/);
     if (boldItalicAst) {
       return { content: boldItalicAst[1], startOffset: 3, fullLength: boldItalicAst[0].length };
@@ -469,7 +469,7 @@ class ReadingHighlighterPlugin extends Plugin {
       return { content: boldItalicUnd[1], startOffset: 3, fullLength: boldItalicUnd[0].length };
     }
 
-    // Bold **texto** or __texto__
+    // Bold **text** or __text__
     const boldAst = remaining.match(/^\*\*(.*?)\*\*/);
     if (boldAst) {
       return { content: boldAst[1], startOffset: 2, fullLength: boldAst[0].length };
@@ -479,13 +479,13 @@ class ReadingHighlighterPlugin extends Plugin {
       return { content: boldUnd[1], startOffset: 2, fullLength: boldUnd[0].length };
     }
 
-    // Strikethrough ~~texto~~
+    // Strikethrough ~~text~~
     const strikeMatch = remaining.match(/^~~(.*?)~~/);
     if (strikeMatch) {
       return { content: strikeMatch[1], startOffset: 2, fullLength: strikeMatch[0].length };
     }
 
-    // Italic *texto* or _texto_
+    // Italic *text* or _text_
     const italicAst = remaining.match(/^\*(.*?)\*/);
     if (italicAst) {
       return { content: italicAst[1], startOffset: 1, fullLength: italicAst[0].length };
@@ -495,13 +495,13 @@ class ReadingHighlighterPlugin extends Plugin {
       return { content: italicUnd[1], startOffset: 1, fullLength: italicUnd[0].length };
     }
 
-    // Highlight ==texto==
+    // Highlight ==text==
     const highlightMatch = remaining.match(/^==(.*?)==/);
     if (highlightMatch) {
       return { content: highlightMatch[1], startOffset: 2, fullLength: highlightMatch[0].length };
     }
 
-    // Inline code `texto`
+    // Inline code `text`
     const codeMatch = remaining.match(/^`([^`]+)`/);
     if (codeMatch) {
       return { content: codeMatch[1], startOffset: 1, fullLength: codeMatch[0].length };
@@ -510,15 +510,15 @@ class ReadingHighlighterPlugin extends Plugin {
     return null;
   }
 
-  /*────────── Buscar mejor coincidencia ──────────*/
+  /*────────── Find best match ──────────*/
   findBestMatch(text, snippet) {
     const normalizedSnippet = snippet.trim();
 
-    // Buscar coincidencia exacta
+    // Search for exact match
     const exactMatch = this.uniqueDirectMatch(text, normalizedSnippet);
     if (exactMatch[0] != null) return exactMatch;
 
-    // Buscar con espacios normalizados
+    // Search with normalized whitespace
     const normalizedText = text.replace(/\s+/g, ' ');
     const normalizedSnippetSpaces = normalizedSnippet.replace(/\s+/g, ' ');
 
@@ -531,14 +531,14 @@ class ReadingHighlighterPlugin extends Plugin {
     }
 
     if (matches.length === 1) {
-      // Mapear de vuelta al texto original
+      // Map back to original text
       return this.mapNormalizedToOriginal(text, normalizedText, matches[0]);
     }
 
     return [null, null];
   }
 
-  /*────────── Mapear texto normalizado a original ──────────*/
+  /*────────── Map normalized text to original ──────────*/
   mapNormalizedToOriginal(originalText, normalizedText, [normalizedStart, normalizedEnd]) {
     let originalPos = 0;
     let normalizedPos = 0;
@@ -557,7 +557,7 @@ class ReadingHighlighterPlugin extends Plugin {
         originalPos++;
         normalizedPos++;
       } else if (/\s/.test(originalChar)) {
-        // Espacios múltiples en original = un espacio en normalizado
+        // Multiple spaces in original = one space in normalized
         originalPos++;
         while (originalPos < originalText.length && /\s/.test(originalText[originalPos])) {
           originalPos++;
@@ -575,11 +575,11 @@ class ReadingHighlighterPlugin extends Plugin {
     return [originalStart, originalEnd];
   }
 
-  /*────────── Mapear posiciones renderizadas a fuente ──────────*/
+  /*────────── Map rendered positions to source ──────────*/
   mapRenderedPositionsToSource(positionMap, [renderedStart, renderedEnd]) {
     const { map } = positionMap;
 
-    // Encontrar el primer elemento que corresponde al inicio
+    // Find the first entry that corresponds to the start
     let startEntry = null;
     let endEntry = null;
 
@@ -605,7 +605,7 @@ class ReadingHighlighterPlugin extends Plugin {
     return [startEntry.sourceStart, endEntry.sourceEnd];
   }
 
-  /*────────── Búsqueda flexible ──────────*/
+  /*────────── Flexible search ──────────*/
   findFlexibleMatch(source, snippet) {
     const words = snippet.trim().split(/\s+/);
     if (words.length < 2) return [null, null];
@@ -626,13 +626,13 @@ class ReadingHighlighterPlugin extends Plugin {
         return [match.index, match.index + match[0].length];
       }
     } catch (e) {
-      // Falló el regex
+      // Regex failed
     }
 
     return [null, null];
   }
 
-  /*────────── Métodos auxiliares ──────────*/
+  /*────────── Helper methods ──────────*/
   uniqueDirectMatch(src, text) {
     const idx = src.indexOf(text);
     if (idx === -1) return [null, null];

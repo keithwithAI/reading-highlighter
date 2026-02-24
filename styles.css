@@ -1,4 +1,4 @@
-/* Color y aspecto del ==subrayado== en modo lectura */
+/* Color and appearance of ==highlights== in reading mode */
 .markdown-reading-view mark,
 .markdown-preview-view mark {
   background-color: var(--text-highlight-bg, #ffe347);
