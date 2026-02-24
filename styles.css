@@ -4,3 +4,20 @@
   background-color: var(--text-highlight-bg, #ffe347);
   padding: 0 0.1em;
 }
+
+/* Floating highlight button */
+.reading-highlighter-float-btn {
+  position: fixed;
+  bottom: 30px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: var(--layer-popover, 1000);
+  padding: 10px 15px;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+  background-color: var(--interactive-accent);
+  color: var(--text-on-accent);
+  display: none;
+}

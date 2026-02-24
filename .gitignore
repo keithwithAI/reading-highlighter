@@ -1,0 +1,15 @@
+# Build output
+main.js
+
+# Dependencies
+node_modules/
+
+# IDE
+.idea/
+*.sublime-workspace
+
+# OS
+.DS_Store
+
+# Plugin data
+data.json

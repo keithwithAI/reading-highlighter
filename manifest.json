@@ -1,10 +1,11 @@
 {
-  "id": "reading-highlighter",
-  "name": "Reading Highlighter",
-  "version": "1.5",
-  "minAppVersion": "0.15.0",
-  "description": "Highlight selected text directly in reading mode with a keyboard shortcut.",
-  "author": "Tintalectrónico ",
-  "authorUrl": "https://alexochoa.es",
-  "main": "main.js"
+	"id": "reading-highlighter",
+	"name": "Reading Highlighter",
+	"version": "1.5.0",
+	"minAppVersion": "1.0.0",
+	"description": "Highlight selected text in reading mode using ==markdown highlight== syntax.",
+	"author": "Tintalectronico",
+	"authorUrl": "https://alexochoa.es",
+	"isDesktopOnly": false,
+	"main": "main.js"
 }
