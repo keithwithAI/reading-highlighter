@@ -1,0 +1,10 @@
+{
+  "id": "reading-highlighter",
+  "name": "Reading Highlighter",
+  "version": "1.5",
+  "minAppVersion": "0.15.0",
+  "description": "Subraya texto seleccionado directamente en el modo lectura con un shortcut.",
+  "author": "Tintalectrónico ",
+  "authorUrl": "https://alexochoa.es",
+  "main": "main.js"
+}

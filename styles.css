@@ -1,0 +1,6 @@
+/* Color y aspecto del ==subrayado== en modo lectura */
+.markdown-reading-view mark,
+.markdown-preview-view mark {
+  background-color: var(--text-highlight-bg, #ffe347);
+  padding: 0 0.1em;
+}
