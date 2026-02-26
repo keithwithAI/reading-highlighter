@@ -157,18 +157,22 @@ export default class ReadingHighlighterPlugin extends Plugin {
 
       if (a1 != null && b1 != null) {
         [a_orig, b_orig] = [Math.min(a1, b1), Math.max(a1, b1)];
-      } else {
+      }
+
+      const invalidSourcePos =
+        a_orig == null ||
+        b_orig == null ||
+        b_orig <= a_orig ||
+        a_orig < 0 ||
+        b_orig > raw.length;
+
+      if (invalidSourcePos) {
         const pos_fallback = this.findMatchWithLinks(raw, snippet);
         if (pos_fallback[0] == null || pos_fallback[1] == null) {
           found = false;
           return raw;
         }
         [a_orig, b_orig] = pos_fallback as [number, number];
-      }
-
-      if (a_orig == null || b_orig == null) {
-        found = false;
-        return raw;
       }
 
       let currentA = a_orig;
@@ -250,9 +254,11 @@ export default class ReadingHighlighterPlugin extends Plugin {
     // Preserve leading whitespace
     const leadingMatch = line.match(/^(\s*)/);
     const leadingSpaces = leadingMatch ? leadingMatch[1] : "";
-    const trimmedLine = line.trim();
+    const trailingMatch = line.match(/(\s*)$/);
+    const trailingSpaces = trailingMatch ? trailingMatch[1] : "";
+    const core = line.slice(leadingSpaces.length, line.length - trailingSpaces.length);
 
-    if (!trimmedLine) return line;
+    if (!core.trim()) return line;
 
     // Block-level prefixes: == must go AFTER these markers
     const blockPrefixPatterns: RegExp[] = [
@@ -263,16 +269,16 @@ export default class ReadingHighlighterPlugin extends Plugin {
     ];
 
     for (const pattern of blockPrefixPatterns) {
-      const match = trimmedLine.match(pattern);
+      const match = core.match(pattern);
       if (match) {
         const prefix = match[1];
         const content = match[2];
-        return leadingSpaces + prefix + "==" + content + "==";
+        return leadingSpaces + prefix + "==" + content + "==" + trailingSpaces;
       }
     }
 
     // No block-level prefix: wrap the whole line
-    return leadingSpaces + "==" + trimmedLine + "==";
+    return leadingSpaces + "==" + core + "==" + trailingSpaces;
   }
 
   /*────────── Scroll helpers ──────────*/
