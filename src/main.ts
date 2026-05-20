@@ -163,15 +163,11 @@ export default class ReadingHighlighterPlugin extends Plugin {
   }
 
   showFloatingButton(): void {
-    if (this.floatingButtonEl) {
-      this.floatingButtonEl.style.display = "block";
-    }
+    this.floatingButtonEl?.addClass("is-visible");
   }
 
   hideFloatingButton(): void {
-    if (this.floatingButtonEl) {
-      this.floatingButtonEl.style.display = "none";
-    }
+    this.floatingButtonEl?.removeClass("is-visible");
   }
 
   /*───────────────── Main logic ─────────────────*/
