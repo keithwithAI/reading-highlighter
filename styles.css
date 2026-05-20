@@ -20,4 +20,10 @@
   background-color: var(--interactive-accent);
   color: var(--text-on-accent);
   display: none;
+
+  /* Don't let mousedown on the button start/clear a text selection
+     before our click handler reads document.getSelection(). */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }

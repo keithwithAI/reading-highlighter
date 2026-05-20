@@ -19,11 +19,23 @@ interface FormattingMatch {
   fullLength: number;
 }
 
+interface SourcePosRange {
+  start: number;
+  end: number;
+}
+
+interface SelectionSnapshot {
+  text: string;
+  viewPath: string | null;
+  paragraphStart: number | null;
+  paragraphEnd: number | null;
+}
+
 type NullablePair = [number | null, number | null];
 
 export default class ReadingHighlighterPlugin extends Plugin {
   floatingButtonEl: HTMLButtonElement | null = null;
-  boundHandleSelectionChange: (() => void) | null = null;
+  selectionSnapshot: SelectionSnapshot | null = null;
 
   onload(): void {
     /*── Command palette ──*/
@@ -41,22 +53,26 @@ export default class ReadingHighlighterPlugin extends Plugin {
 
     /*── Ribbon icon (mobile only) ──*/
     if (Platform.isMobile) {
-      const btn = this.addRibbonIcon("highlighter", "Highlight selection", () => {
+      this.addRibbonIcon("highlighter", "Highlight selection", () => {
         const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-        if (view && view.getMode() === "preview") this.highlightSelection(view);
-        else new Notice("Open the note in reading mode first.");
+        if (view && view.getMode() === "preview") {
+          this.highlightSelection(view);
+        } else {
+          new Notice("Open the note in reading mode first.");
+        }
       });
-      this.register(() => btn.remove());
     }
 
-    /*── Floating button logic ──*/
+    /*── Floating button ──*/
     this.createFloatingButton();
-    this.boundHandleSelectionChange = this.handleSelectionChange.bind(this);
-    this.registerDomEvent(document, "selectionchange", this.boundHandleSelectionChange);
+    this.registerDomEvent(document, "selectionchange", () =>
+      this.handleSelectionChange()
+    );
 
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", () => {
-        // Update button state when the active leaf changes
+        // Different file/view → any cached selection is stale
+        this.selectionSnapshot = null;
         this.handleSelectionChange();
       })
     );
@@ -65,11 +81,11 @@ export default class ReadingHighlighterPlugin extends Plugin {
   }
 
   onunload(): void {
-    // Obsidian automatically unregisters registerDomEvent and registerEvent listeners
     if (this.floatingButtonEl) {
       this.floatingButtonEl.remove();
       this.floatingButtonEl = null;
     }
+    this.selectionSnapshot = null;
   }
 
   createFloatingButton(): void {
@@ -78,9 +94,18 @@ export default class ReadingHighlighterPlugin extends Plugin {
     this.floatingButtonEl = document.createElement("button");
     setIcon(this.floatingButtonEl, "highlighter");
     this.floatingButtonEl.setAttribute("aria-label", "Highlight selection");
+    this.floatingButtonEl.setAttribute("type", "button");
     this.floatingButtonEl.addClass("reading-highlighter-float-btn");
 
-    this.registerDomEvent(this.floatingButtonEl, "click", () => {
+    // mousedown default = focus the button, which collapses the text
+    // selection in most browsers. Preventing it keeps the selection alive
+    // until the click handler reads it.
+    this.registerDomEvent(this.floatingButtonEl, "mousedown", (e: MouseEvent) => {
+      e.preventDefault();
+    });
+
+    this.registerDomEvent(this.floatingButtonEl, "click", (e: MouseEvent) => {
+      e.preventDefault();
       const view = this.app.workspace.getActiveViewOfType(MarkdownView);
       if (view && view.getMode() === "preview") {
         this.highlightSelection(view);
@@ -102,18 +127,39 @@ export default class ReadingHighlighterPlugin extends Plugin {
     const snippet = sel?.toString() ?? "";
 
     if (snippet.trim() && sel && !sel.isCollapsed) {
-      // Verify the selection is actually within the reading view content
       const anchorNode = sel.anchorNode;
-      const previewEl = view.containerEl.querySelector(".markdown-reading-view") ??
-                        view.containerEl.querySelector(".markdown-preview-view");
-      if (previewEl && anchorNode && previewEl.contains(anchorNode)) {
+      const focusNode = sel.focusNode;
+      const previewEl = this.getPreviewEl(view);
+      if (
+        previewEl &&
+        anchorNode &&
+        previewEl.contains(anchorNode) &&
+        focusNode &&
+        previewEl.contains(focusNode)
+      ) {
+        const anchorRange = this.sourcePosRangeForNode(anchorNode);
+        const focusRange = this.sourcePosRangeForNode(focusNode);
+        let paragraphStart: number | null = null;
+        let paragraphEnd: number | null = null;
+        if (anchorRange && focusRange) {
+          paragraphStart = Math.min(anchorRange.start, focusRange.start);
+          paragraphEnd = Math.max(anchorRange.end, focusRange.end);
+        }
+        this.selectionSnapshot = {
+          text: snippet,
+          viewPath: view.file?.path ?? null,
+          paragraphStart,
+          paragraphEnd,
+        };
         this.showFloatingButton();
-      } else {
-        this.hideFloatingButton();
+        return;
       }
-    } else {
-      this.hideFloatingButton();
     }
+
+    // Selection is collapsed / empty / outside the preview. Hide the button,
+    // but keep the most recent snapshot: tapping a button can collapse the
+    // selection as a side effect and we still want that tap to succeed.
+    this.hideFloatingButton();
   }
 
   showFloatingButton(): void {
@@ -130,43 +176,82 @@ export default class ReadingHighlighterPlugin extends Plugin {
 
   /*───────────────── Main logic ─────────────────*/
   async highlightSelection(view: MarkdownView): Promise<void> {
+    const file = view.file;
+    if (!file) return;
+
+    /* 1. Pick a selection: live if it's still there, otherwise the snapshot */
     const sel = document.getSelection();
-    const snippet = sel?.toString() ?? "";
+    const liveSnippet = sel?.toString() ?? "";
+    const previewEl = this.getPreviewEl(view);
+    const liveValid =
+      liveSnippet.trim().length > 0 &&
+      sel != null &&
+      !sel.isCollapsed &&
+      previewEl != null &&
+      sel.anchorNode != null &&
+      previewEl.contains(sel.anchorNode) &&
+      sel.focusNode != null &&
+      previewEl.contains(sel.focusNode);
+
+    let snippet: string;
+    let paragraphStart: number | null = null;
+    let paragraphEnd: number | null = null;
+
+    if (liveValid && sel) {
+      snippet = liveSnippet;
+      const anchorRange = this.sourcePosRangeForNode(sel.anchorNode);
+      const focusRange = this.sourcePosRangeForNode(sel.focusNode);
+      if (anchorRange && focusRange) {
+        paragraphStart = Math.min(anchorRange.start, focusRange.start);
+        paragraphEnd = Math.max(anchorRange.end, focusRange.end);
+      }
+    } else if (
+      this.selectionSnapshot &&
+      this.selectionSnapshot.viewPath === (file.path ?? null)
+    ) {
+      snippet = this.selectionSnapshot.text;
+      paragraphStart = this.selectionSnapshot.paragraphStart;
+      paragraphEnd = this.selectionSnapshot.paragraphEnd;
+    } else {
+      new Notice("Select text first — nothing selected.");
+      return;
+    }
+
     if (!snippet.trim()) {
       new Notice("Select text first — nothing selected.");
       return;
     }
 
-    /* 1. Save scroll position */
+    /* 2. Save scroll position */
     const scrollBefore = this.getScroll(view);
 
-    /* 2. Get file reference */
-    const file = view.file;
-    if (!file) return;
-
-    /* 3. Pre-compute DOM-based positions before entering process() */
-    const a1 = this.posViaSourcePos(sel?.anchorNode ?? null);
-    const b1 = this.posViaSourcePos(sel?.focusNode ?? null);
-
-    /* 4. Atomically read + modify the file */
+    /* 3. Atomically read + modify the file */
     let found = true;
 
     await this.app.vault.process(file, (raw: string): string => {
-      let a_orig: number | undefined;
-      let b_orig: number | undefined;
+      let a_orig: number | null = null;
+      let b_orig: number | null = null;
 
-      if (a1 != null && b1 != null) {
-        [a_orig, b_orig] = [Math.min(a1, b1), Math.max(a1, b1)];
+      // When we know which paragraph(s) the selection is in, search *only*
+      // inside that window. This is both more accurate (the right occurrence
+      // of a repeated phrase) and faster.
+      if (
+        paragraphStart != null &&
+        paragraphEnd != null &&
+        paragraphStart >= 0 &&
+        paragraphEnd <= raw.length &&
+        paragraphStart < paragraphEnd
+      ) {
+        const windowText = raw.slice(paragraphStart, paragraphEnd);
+        const windowMatch = this.findMatchWithLinks(windowText, snippet);
+        if (windowMatch[0] != null && windowMatch[1] != null) {
+          a_orig = paragraphStart + windowMatch[0];
+          b_orig = paragraphStart + windowMatch[1];
+        }
       }
 
-      const invalidSourcePos =
-        a_orig == null ||
-        b_orig == null ||
-        b_orig <= a_orig ||
-        a_orig < 0 ||
-        b_orig > raw.length;
-
-      if (invalidSourcePos) {
+      // Fall back to searching the whole document.
+      if (a_orig == null || b_orig == null) {
         const pos_fallback = this.findMatchWithLinks(raw, snippet);
         if (pos_fallback[0] == null || pos_fallback[1] == null) {
           found = false;
@@ -177,54 +262,62 @@ export default class ReadingHighlighterPlugin extends Plugin {
 
       let currentA = a_orig;
       let currentB = b_orig;
-      let textToHighlight = raw.slice(currentA, currentB);
       const textBeforeSelection = raw.slice(0, currentA);
-
-      // Inline formatting delimiters to check, from longest to shortest.
-      // If the selection falls inside a formatting span, expand to include
-      // both the opening AND closing delimiters so the result is valid markdown.
-      const inlineDelimiters = ["***", "___", "**", "__", "~~", "*", "_", "`"];
       const textAfterSelection = raw.slice(currentB);
 
+      // If the selection falls inside an inline formatting span but didn't
+      // include the delimiters, extend it so the resulting markdown stays
+      // valid. Longer delimiters first so e.g. `***` isn't matched as `*`.
+      const inlineDelimiters = ["***", "___", "**", "__", "~~", "*", "_", "`"];
       for (const delim of inlineDelimiters) {
-        if (textBeforeSelection.endsWith(delim) && textAfterSelection.startsWith(delim)) {
-          textToHighlight = delim + textToHighlight + delim;
+        if (
+          textBeforeSelection.endsWith(delim) &&
+          textAfterSelection.startsWith(delim)
+        ) {
           currentA -= delim.length;
           currentB += delim.length;
           break;
         }
       }
 
-      /* Process the selected text by paragraphs */
+      const textToHighlight = raw.slice(currentA, currentB);
       const updatedText = this.addHighlightsByParagraph(textToHighlight);
 
       return raw.slice(0, currentA) + updatedText + raw.slice(currentB);
     });
 
     if (!found) {
+      console.debug("[Reading Highlighter] Could not locate selection", {
+        snippet: snippet.length > 200 ? snippet.slice(0, 200) + "…" : snippet,
+        snippetLength: snippet.length,
+        paragraphStart,
+        paragraphEnd,
+      });
       new Notice("Unable to locate the selection in the file.");
       return;
     }
 
-    /* 5. Restore scroll (double pass) */
+    /* 4. Restore scroll — two passes because rendering can finish late */
     const restore = () => this.applyScroll(view, scrollBefore);
     requestAnimationFrame(() => {
       restore();
       setTimeout(restore, 50);
     });
 
+    /* 5. Clean up selection + cache */
     sel?.removeAllRanges();
+    this.selectionSnapshot = null;
+    this.hideFloatingButton();
   }
 
   /*────────── Add highlights by paragraph ──────────*/
   addHighlightsByParagraph(text: string): string {
-    // Split into paragraphs while preserving the exact separators (blank lines
-    // may contain whitespace) so the file content isn't silently modified.
+    // Split into paragraphs while preserving the exact separators (blank
+    // lines may contain whitespace) so the file content isn't silently
+    // modified. parts alternates: [content, sep, content, sep, …]
     const parts = text.split(/(\n\s*\n)/);
-    // parts alternates: [content, separator, content, separator, ...]
 
     if (parts.length === 1) {
-      // Single paragraph — process line by line
       const lines = text.split("\n");
       if (lines.length === 1) {
         return this.addHighlightToLine(text);
@@ -234,11 +327,9 @@ export default class ReadingHighlighterPlugin extends Plugin {
         .join("\n");
     }
 
-    // Multiple paragraphs — highlight content parts, keep separators intact
     return parts
       .map((part, index) => {
-        // Odd indices are separators — return as-is
-        if (index % 2 === 1) return part;
+        if (index % 2 === 1) return part; // separator
         if (!part.trim()) return part;
 
         const lines = part.split("\n");
@@ -251,21 +342,23 @@ export default class ReadingHighlighterPlugin extends Plugin {
 
   /*────────── Add highlight to a single line ──────────*/
   addHighlightToLine(line: string): string {
-    // Preserve leading whitespace
     const leadingMatch = line.match(/^(\s*)/);
     const leadingSpaces = leadingMatch ? leadingMatch[1] : "";
     const trailingMatch = line.match(/(\s*)$/);
     const trailingSpaces = trailingMatch ? trailingMatch[1] : "";
-    const core = line.slice(leadingSpaces.length, line.length - trailingSpaces.length);
+    const core = line.slice(
+      leadingSpaces.length,
+      line.length - trailingSpaces.length
+    );
 
     if (!core.trim()) return line;
 
     // Block-level prefixes: == must go AFTER these markers
     const blockPrefixPatterns: RegExp[] = [
-      /^(#{1,6}\s+)(.*)$/, // Headers: # ## ### etc.
-      /^(>\s+)(.*)$/, // Blockquotes: >
-      /^([-*+]\s+)(.*)$/, // Unordered list: - * +
-      /^(\d+\.\s+)(.*)$/, // Ordered list: 1. 2. etc.
+      /^(#{1,6}\s+)(.*)$/, // Headers
+      /^(>\s+)(.*)$/, // Blockquotes
+      /^([-*+]\s+)(.*)$/, // Unordered list
+      /^(\d+\.\s+)(.*)$/, // Ordered list
     ];
 
     for (const pattern of blockPrefixPatterns) {
@@ -277,8 +370,15 @@ export default class ReadingHighlighterPlugin extends Plugin {
       }
     }
 
-    // No block-level prefix: wrap the whole line
     return leadingSpaces + "==" + core + "==" + trailingSpaces;
+  }
+
+  /*────────── DOM helpers ──────────*/
+  getPreviewEl(view: MarkdownView): Element | null {
+    return (
+      view.containerEl.querySelector(".markdown-reading-view") ??
+      view.containerEl.querySelector(".markdown-preview-view")
+    );
   }
 
   /*────────── Scroll helpers ──────────*/
@@ -298,76 +398,152 @@ export default class ReadingHighlighterPlugin extends Plugin {
   }
 
   getFallbackScroll(view: MarkdownView): { x: number; y: number } {
-    const el =
-      view.containerEl.querySelector(".markdown-reading-view") ??
-      view.containerEl.querySelector(".markdown-preview-view");
+    const el = this.getPreviewEl(view);
     return { x: 0, y: el?.scrollTop ?? 0 };
   }
 
   setFallbackScroll(view: MarkdownView, { y }: { x?: number; y: number }): void {
-    const el =
-      view.containerEl.querySelector(".markdown-reading-view") ??
-      view.containerEl.querySelector(".markdown-preview-view");
+    const el = this.getPreviewEl(view);
     if (el) el.scrollTop = y;
   }
 
   /*────────── Position helpers ──────────*/
-  posViaSourcePos(node: Node | null): number | null {
+  /**
+   * Resolve the source-markdown byte range for the markdown block
+   * (paragraph / heading / list item / …) containing `node`. Obsidian
+   * annotates blocks with `data-sourcepos="line:col-line:col"` (1-indexed,
+   * end column is the last character). Returns null if no ancestor within
+   * 10 levels carries sourcepos metadata.
+   */
+  sourcePosRangeForNode(node: Node | null): SourcePosRange | null {
     if (!node) return null;
     let el: HTMLElement | null =
-      node.nodeType === Node.TEXT_NODE ? (node as Text).parentElement : (node as HTMLElement);
-    // Traverse up to 5 levels
+      node.nodeType === Node.TEXT_NODE
+        ? (node as Text).parentElement
+        : (node as HTMLElement);
     let count = 0;
-    while (el && !el.getAttribute("data-sourcepos") && count < 5) {
+    while (el && !el.getAttribute("data-sourcepos") && count < 10) {
       el = el.parentElement;
       count++;
     }
-    if (!el || !el.getAttribute("data-sourcepos")) return null;
-    const sourcePosAttr = el.getAttribute("data-sourcepos");
-    if (!sourcePosAttr) return null;
+    if (!el) return null;
+    const attr = el.getAttribute("data-sourcepos");
+    if (!attr) return null;
 
-    const [start] = sourcePosAttr.split("-");
-    const [lStr, cStr] = start.split(":");
-
-    const l = parseInt(lStr, 10);
-    const c = parseInt(cStr, 10);
-    if (isNaN(l) || isNaN(c)) return null;
+    const [startStr, endStr] = attr.split("-");
+    if (!startStr || !endStr) return null;
 
     const viewData = this.app.workspace
       .getActiveViewOfType(MarkdownView)
       ?.getViewData();
     if (!viewData) return null;
-
     const lines = viewData.split("\n");
+
+    const startOffset = this.lineColToOffset(lines, startStr);
+    if (startOffset == null) return null;
+    const endOffset = this.lineColToOffset(lines, endStr);
+    if (endOffset == null) return null;
+
+    // sourcepos end column points at the last character — bump by 1 so the
+    // slice is exclusive-end and includes that character. Clamp to length.
+    const end = Math.min(viewData.length, endOffset + 1);
+    if (end <= startOffset) return null;
+
+    return { start: startOffset, end };
+  }
+
+  lineColToOffset(lines: string[], lineCol: string): number | null {
+    const [lStr, cStr] = lineCol.split(":");
+    const line = parseInt(lStr, 10);
+    const col = parseInt(cStr, 10);
+    if (isNaN(line) || isNaN(col) || line < 1) return null;
+
     let off = 0;
-    // l-1 because sourcepos is 1-indexed
-    for (let i = 0; i < l - 1; i++) {
+    for (let i = 0; i < line - 1; i++) {
       if (lines[i] === undefined) return null;
-      off += lines[i].length + 1;
+      off += lines[i].length + 1; // +1 for the newline
     }
-    // c-1 because sourcepos is 1-indexed
-    return off + (c - 1);
+    if (lines[line - 1] === undefined) return null;
+    return off + Math.max(0, col - 1);
   }
 
   /*────────── Enhanced search with link handling ──────────*/
   findMatchWithLinks(source: string, snippet: string): NullablePair {
-    /* A. Find unique direct match */
+    /* A. Unique direct match */
     const direct = this.uniqueDirectMatch(source, snippet);
     if (direct[0] != null) return direct;
 
-    /* B. Create position map and search in rendered text */
+    // Typography: selections made in reading mode carry the rendered form
+    // (smart quotes, en/em-dash, ellipsis), which won't appear verbatim in
+    // the markdown source. Denormalize the snippet and retry as needed.
+    const denormSnippet = this.typographyDenormalize(snippet);
+    const snippetChanged = denormSnippet !== snippet;
+
+    if (snippetChanged) {
+      const denormDirect = this.uniqueDirectMatch(source, denormSnippet);
+      if (denormDirect[0] != null) return denormDirect;
+    }
+
+    /* B. Position map + search in rendered text */
     const positionMap = this.createPositionMap(source);
     const rendered = positionMap.renderedText;
 
-    // Search in rendered text
     const renderedMatch = this.findBestMatch(rendered, snippet);
     if (renderedMatch[0] != null) {
-      // Convert rendered text positions back to markdown source
       return this.mapRenderedPositionsToSource(positionMap, renderedMatch);
     }
+    if (snippetChanged) {
+      const renderedDenorm = this.findBestMatch(rendered, denormSnippet);
+      if (renderedDenorm[0] != null) {
+        return this.mapRenderedPositionsToSource(positionMap, renderedDenorm);
+      }
+    }
 
-    /* C. Flexible search as fallback */
-    return this.findFlexibleMatch(source, snippet);
+    /* C. Flexible fallback */
+    const flex = this.findFlexibleMatch(source, snippet);
+    if (flex[0] != null) return flex;
+    if (snippetChanged) {
+      const flexDenorm = this.findFlexibleMatch(source, denormSnippet);
+      if (flexDenorm[0] != null) return flexDenorm;
+    }
+
+    return [null, null];
+  }
+
+  /**
+   * Map typography-rendered characters back to their markdown source
+   * equivalents: smart quotes → straight, en/em-dash → --/---, ellipsis
+   * → ..., non-breaking space → space.
+   */
+  typographyDenormalize(s: string): string {
+    let out = "";
+    for (const c of s) {
+      switch (c) {
+        case "\u2018":
+        case "\u2019":
+          out += "'";
+          break;
+        case "\u201C":
+        case "\u201D":
+          out += '"';
+          break;
+        case "\u2013":
+          out += "--";
+          break;
+        case "\u2014":
+          out += "---";
+          break;
+        case "\u2026":
+          out += "...";
+          break;
+        case "\u00A0":
+          out += " ";
+          break;
+        default:
+          out += c;
+      }
+    }
+    return out;
   }
 
   /*────────── Create position map ──────────*/
@@ -379,9 +555,31 @@ export default class ReadingHighlighterPlugin extends Plugin {
     while (sourcePos < source.length) {
       const char = source[sourcePos];
 
-      // Detect markdown links [text](url)
+      // Backslash escapes \X → X (for markdown punctuation). Obsidian
+      // strips the backslash when rendering, so the DOM selection contains
+      // just X. We map the full two-char escape to a single rendered char.
+      if (
+        char === "\\" &&
+        sourcePos + 1 < source.length &&
+        this.isMarkdownEscapable(source[sourcePos + 1])
+      ) {
+        map.push({
+          sourceStart: sourcePos,
+          sourceEnd: sourcePos + 2,
+          renderedPos: renderedText.length,
+          isInLink: false,
+          linkType: null,
+        });
+        renderedText += source[sourcePos + 1];
+        sourcePos += 2;
+        continue;
+      }
+
+      // Markdown links [text](url)
       if (char === "[") {
-        const mdLinkMatch = source.slice(sourcePos).match(/^\[([^\]]+)\]\([^)]*\)/);
+        const mdLinkMatch = source
+          .slice(sourcePos)
+          .match(/^\[([^\]]+)\]\([^)]*\)/);
         if (mdLinkMatch) {
           const fullMatch = mdLinkMatch[0];
           const linkText = mdLinkMatch[1];
@@ -401,7 +599,7 @@ export default class ReadingHighlighterPlugin extends Plugin {
           continue;
         }
 
-        // Detect wikilinks [[link|text]] or [[link]]
+        // Wikilinks [[link|text]] or [[link]]
         const wikiLinkMatch = source
           .slice(sourcePos)
           .match(/^\[\[([^\]|]*?)(?:\|([^\]]*?))?\]\]/);
@@ -425,7 +623,7 @@ export default class ReadingHighlighterPlugin extends Plugin {
         }
       }
 
-      // Detect other common markdown formatting
+      // Inline markdown formatting
       if (
         char === "*" ||
         char === "_" ||
@@ -435,18 +633,43 @@ export default class ReadingHighlighterPlugin extends Plugin {
       ) {
         const formatting = this.detectFormatting(source, sourcePos);
         if (formatting) {
-          for (let i = 0; i < formatting.content.length; i++) {
-            map.push({
-              sourceStart: sourcePos + formatting.startOffset,
-              sourceEnd:
-                sourcePos + formatting.startOffset + formatting.content.length,
-              renderedPos: renderedText.length + i,
-              isInLink: false,
-              linkType: null,
-            });
+          const spanStart = sourcePos;
+          const spanEnd = sourcePos + formatting.fullLength;
+          const rawContent = formatting.content;
+          let ci = 0;
+          // Every rendered char inside the span points at the FULL span
+          // (delimiters included), mirroring how links are handled. This
+          // means a selection that begins inside `**foo**` will include
+          // the `**` delimiters in the highlighted range — otherwise the
+          // resulting markdown becomes `**==foo==**` and nests badly.
+          while (ci < rawContent.length) {
+            if (
+              rawContent[ci] === "\\" &&
+              ci + 1 < rawContent.length &&
+              this.isMarkdownEscapable(rawContent[ci + 1])
+            ) {
+              map.push({
+                sourceStart: spanStart,
+                sourceEnd: spanEnd,
+                renderedPos: renderedText.length,
+                isInLink: false,
+                linkType: null,
+              });
+              renderedText += rawContent[ci + 1];
+              ci += 2;
+            } else {
+              map.push({
+                sourceStart: spanStart,
+                sourceEnd: spanEnd,
+                renderedPos: renderedText.length,
+                isInLink: false,
+                linkType: null,
+              });
+              renderedText += rawContent[ci];
+              ci++;
+            }
           }
 
-          renderedText += formatting.content;
           sourcePos += formatting.fullLength;
           continue;
         }
@@ -468,11 +691,20 @@ export default class ReadingHighlighterPlugin extends Plugin {
     return { renderedText, map };
   }
 
+  /**
+   * ASCII-punctuation characters that become literal when preceded by `\`
+   * in CommonMark / Obsidian. Used to strip `\` from the rendered form
+   * without consuming backslashes that aren't acting as escapes.
+   */
+  isMarkdownEscapable(ch: string): boolean {
+    return /[\\`*_{}[\]()#+\-.!|<>~"']/.test(ch);
+  }
+
   /*────────── Detect markdown formatting ──────────*/
   detectFormatting(source: string, pos: number): FormattingMatch | null {
     const remaining = source.slice(pos);
 
-    // Order matters: check longer delimiters before shorter ones.
+    // Order matters: longer delimiters first.
     const patterns: Array<{ regex: RegExp; offset: number }> = [
       { regex: /^\*\*\*(.*?)\*\*\*/, offset: 3 },
       { regex: /^___(.*?)___/, offset: 3 },
@@ -503,11 +735,10 @@ export default class ReadingHighlighterPlugin extends Plugin {
   findBestMatch(text: string, snippet: string): NullablePair {
     const normalizedSnippet = snippet.trim();
 
-    // Search for exact match
     const exactMatch = this.uniqueDirectMatch(text, normalizedSnippet);
     if (exactMatch[0] != null) return exactMatch;
 
-    // Search with normalized whitespace
+    // Try again with collapsed whitespace
     const normalizedText = text.replace(/\s+/g, " ");
     const normalizedSnippetSpaces = normalizedSnippet.replace(/\s+/g, " ");
 
@@ -522,14 +753,13 @@ export default class ReadingHighlighterPlugin extends Plugin {
     }
 
     if (matches.length === 1) {
-      // Map back to original text
       return this.mapNormalizedToOriginal(text, normalizedText, matches[0]);
     }
 
     return [null, null];
   }
 
-  /*────────── Map normalized text to original ──────────*/
+  /*────────── Map normalized text → original ──────────*/
   mapNormalizedToOriginal(
     originalText: string,
     normalizedText: string,
@@ -544,7 +774,7 @@ export default class ReadingHighlighterPlugin extends Plugin {
       originalPos < originalText.length &&
       normalizedPos <= normalizedEnd
     ) {
-      if (normalizedPos === normalizedStart) {
+      if (normalizedPos === normalizedStart && originalStart === null) {
         originalStart = originalPos;
       }
 
@@ -568,7 +798,7 @@ export default class ReadingHighlighterPlugin extends Plugin {
         originalPos++;
       }
 
-      if (normalizedPos === normalizedEnd) {
+      if (normalizedPos === normalizedEnd && originalEnd === null) {
         originalEnd = originalPos;
       }
     }
@@ -576,7 +806,7 @@ export default class ReadingHighlighterPlugin extends Plugin {
     return [originalStart, originalEnd];
   }
 
-  /*────────── Map rendered positions to source ──────────*/
+  /*────────── Map rendered positions → source ──────────*/
   mapRenderedPositionsToSource(
     positionMap: PositionMap,
     [renderedStart, renderedEnd]: [number | null, number | null]
@@ -595,15 +825,15 @@ export default class ReadingHighlighterPlugin extends Plugin {
       }
     }
 
-    if (!startEntry || !endEntry) {
-      return [null, null];
-    }
+    if (!startEntry || !endEntry) return [null, null];
 
-    // If both are in the same link, use the full link span
+    // If both endpoints fall inside the SAME containing span (link, inline
+    // formatting, or multi-char escape sequence), return that span's full
+    // range. Every character inside such a span shares the same
+    // sourceStart/sourceEnd, so that's what we check.
     if (
-      startEntry.isInLink &&
-      endEntry.isInLink &&
-      startEntry.sourceStart === endEntry.sourceStart
+      startEntry.sourceStart === endEntry.sourceStart &&
+      startEntry.sourceEnd === endEntry.sourceEnd
     ) {
       return [startEntry.sourceStart, startEntry.sourceEnd];
     }
@@ -620,10 +850,7 @@ export default class ReadingHighlighterPlugin extends Plugin {
     const lastWord = this.escapeForRegex(words[words.length - 1]);
 
     try {
-      const regex = new RegExp(
-        `${firstWord}[\\s\\S]*?${lastWord}`,
-        "gi"
-      );
+      const regex = new RegExp(`${firstWord}[\\s\\S]*?${lastWord}`, "gi");
       const matches = [...source.matchAll(regex)];
 
       const validMatches = matches.filter(
@@ -635,7 +862,7 @@ export default class ReadingHighlighterPlugin extends Plugin {
         return [match.index!, match.index! + match[0].length];
       }
     } catch {
-      // Regex failed
+      // Regex failed — give up
     }
 
     return [null, null];
@@ -643,9 +870,12 @@ export default class ReadingHighlighterPlugin extends Plugin {
 
   /*────────── Helper methods ──────────*/
   uniqueDirectMatch(src: string, text: string): NullablePair {
+    if (!text) return [null, null];
     const idx = src.indexOf(text);
     if (idx === -1) return [null, null];
-    if (src.indexOf(text, idx + text.length) !== -1) return [null, null];
+    // Check for any other occurrence, including overlapping ones (e.g.
+    // "aa" inside "aaa" would otherwise be falsely reported as unique).
+    if (src.indexOf(text, idx + 1) !== -1) return [null, null];
     return [idx, idx + text.length];
   }
 
