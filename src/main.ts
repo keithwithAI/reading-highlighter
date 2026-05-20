@@ -46,7 +46,7 @@ export default class ReadingHighlighterPlugin extends Plugin {
         const view = this.app.workspace.getActiveViewOfType(MarkdownView);
         if (!view || view.getMode() !== "preview") return false;
         if (checking) return true;
-        this.highlightSelection(view);
+        void this.highlightSelection(view);
         return true;
       },
     });
@@ -56,7 +56,7 @@ export default class ReadingHighlighterPlugin extends Plugin {
       this.addRibbonIcon("highlighter", "Highlight selection", () => {
         const view = this.app.workspace.getActiveViewOfType(MarkdownView);
         if (view && view.getMode() === "preview") {
-          this.highlightSelection(view);
+          void this.highlightSelection(view);
         } else {
           new Notice("Open the note in reading mode first.");
         }
@@ -65,7 +65,7 @@ export default class ReadingHighlighterPlugin extends Plugin {
 
     /*── Floating button ──*/
     this.createFloatingButton();
-    this.registerDomEvent(document, "selectionchange", () =>
+    this.registerDomEvent(activeDocument, "selectionchange", () =>
       this.handleSelectionChange()
     );
 
@@ -91,7 +91,7 @@ export default class ReadingHighlighterPlugin extends Plugin {
   createFloatingButton(): void {
     if (this.floatingButtonEl) return;
 
-    this.floatingButtonEl = document.createElement("button");
+    this.floatingButtonEl = activeDocument.createElement("button");
     setIcon(this.floatingButtonEl, "highlighter");
     this.floatingButtonEl.setAttribute("aria-label", "Highlight selection");
     this.floatingButtonEl.setAttribute("type", "button");
@@ -108,12 +108,12 @@ export default class ReadingHighlighterPlugin extends Plugin {
       e.preventDefault();
       const view = this.app.workspace.getActiveViewOfType(MarkdownView);
       if (view && view.getMode() === "preview") {
-        this.highlightSelection(view);
+        void this.highlightSelection(view);
       }
       this.hideFloatingButton();
     });
 
-    document.body.appendChild(this.floatingButtonEl);
+    activeDocument.body.appendChild(this.floatingButtonEl);
   }
 
   handleSelectionChange(): void {
@@ -123,7 +123,7 @@ export default class ReadingHighlighterPlugin extends Plugin {
       return;
     }
 
-    const sel = document.getSelection();
+    const sel = activeDocument.getSelection();
     const snippet = sel?.toString() ?? "";
 
     if (snippet.trim() && sel && !sel.isCollapsed) {
@@ -176,7 +176,7 @@ export default class ReadingHighlighterPlugin extends Plugin {
     if (!file) return;
 
     /* 1. Pick a selection: live if it's still there, otherwise the snapshot */
-    const sel = document.getSelection();
+    const sel = activeDocument.getSelection();
     const liveSnippet = sel?.toString() ?? "";
     const previewEl = this.getPreviewEl(view);
     const liveValid =
@@ -253,11 +253,19 @@ export default class ReadingHighlighterPlugin extends Plugin {
           found = false;
           return raw;
         }
-        [a_orig, b_orig] = pos_fallback as [number, number];
+        [a_orig, b_orig] = pos_fallback;
       }
 
-      let currentA = a_orig;
-      let currentB = b_orig;
+      // Narrow a_orig/b_orig from `number | null` to `number` — by this point
+      // either the window search set them, or the fallback above did. The
+      // explicit guard is redundant logically but lets the type system see it.
+      if (a_orig == null || b_orig == null) {
+        found = false;
+        return raw;
+      }
+
+      let currentA: number = a_orig;
+      let currentB: number = b_orig;
       const textBeforeSelection = raw.slice(0, currentA);
       const textAfterSelection = raw.slice(currentB);
 
@@ -289,9 +297,9 @@ export default class ReadingHighlighterPlugin extends Plugin {
 
     /* 4. Restore scroll — two passes because rendering can finish late */
     const restore = () => this.applyScroll(view, scrollBefore);
-    requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => {
       restore();
-      setTimeout(restore, 50);
+      window.setTimeout(restore, 50);
     });
 
     /* 5. Clean up selection + cache */
@@ -832,7 +840,7 @@ export default class ReadingHighlighterPlugin extends Plugin {
 
       if (validMatches.length === 1) {
         const match = validMatches[0];
-        return [match.index!, match.index! + match[0].length];
+        return [match.index, match.index + match[0].length];
       }
     } catch {
       // Regex failed — give up
