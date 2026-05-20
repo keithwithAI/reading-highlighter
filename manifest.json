@@ -2,9 +2,9 @@
 	"id": "reading-highlighter",
 	"name": "Reading Highlighter",
 	"version": "1.5.0",
-	"minAppVersion": "1.0.0",
+	"minAppVersion": "1.4.0",
 	"description": "Highlight selected text in reading mode using markdown highlight syntax.",
-	"author": "Tintalectronico",
-	"authorUrl": "https://alexochoa.es",
+	"author": "keithwithAI",
+	"authorUrl": "https://github.com/keithwithAI",
 	"isDesktopOnly": false
 }
