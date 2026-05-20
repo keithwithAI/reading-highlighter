@@ -287,12 +287,6 @@ export default class ReadingHighlighterPlugin extends Plugin {
     });
 
     if (!found) {
-      console.debug("[Reading Highlighter] Could not locate selection", {
-        snippet: snippet.length > 200 ? snippet.slice(0, 200) + "…" : snippet,
-        snippetLength: snippet.length,
-        paragraphStart,
-        paragraphEnd,
-      });
       new Notice("Unable to locate the selection in the file.");
       return;
     }
