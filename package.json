@@ -1,6 +1,6 @@
 {
   "name": "reading-highlighter",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "Highlight selected text in reading mode using markdown highlight syntax.",
   "main": "main.js",
   "scripts": {
