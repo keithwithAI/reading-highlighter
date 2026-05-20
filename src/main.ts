@@ -372,29 +372,12 @@ export default class ReadingHighlighterPlugin extends Plugin {
   }
 
   /*────────── Scroll helpers ──────────*/
-  getScroll(view: MarkdownView): number | { x: number; y: number } {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const preview = (view as any).previewMode;
-    return typeof preview?.getScroll === "function"
-      ? preview.getScroll()
-      : this.getFallbackScroll(view);
+  getScroll(view: MarkdownView): number {
+    return view.previewMode.getScroll();
   }
 
-  applyScroll(view: MarkdownView, pos: number | { x: number; y: number }): void {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const preview = (view as any).previewMode;
-    if (typeof preview?.applyScroll === "function") preview.applyScroll(pos);
-    else this.setFallbackScroll(view, pos as { x: number; y: number });
-  }
-
-  getFallbackScroll(view: MarkdownView): { x: number; y: number } {
-    const el = this.getPreviewEl(view);
-    return { x: 0, y: el?.scrollTop ?? 0 };
-  }
-
-  setFallbackScroll(view: MarkdownView, { y }: { x?: number; y: number }): void {
-    const el = this.getPreviewEl(view);
-    if (el) el.scrollTop = y;
+  applyScroll(view: MarkdownView, pos: number): void {
+    view.previewMode.applyScroll(pos);
   }
 
   /*────────── Position helpers ──────────*/
