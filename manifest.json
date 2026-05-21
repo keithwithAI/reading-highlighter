@@ -1,7 +1,7 @@
 {
 	"id": "reading-highlighter",
 	"name": "Reading Highlighter",
-	"version": "1.5.1",
+	"version": "1.5.2",
 	"minAppVersion": "1.4.0",
 	"description": "Highlight selected text in reading mode using markdown highlight syntax.",
 	"author": "keithwithAI",
