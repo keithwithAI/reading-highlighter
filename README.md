@@ -6,6 +6,7 @@ Highlight selected text in Obsidian's reading mode using `==markdown highlight==
 
 - Select text in reading mode and highlight it instantly
 - Floating highlight button appears when text is selected
+- Undo the most recent highlight with a floating button or command
 - Command palette: **Highlight selection in reading mode**
 - Mobile ribbon icon support
 - Handles multi-paragraph selections, formatted text, and links
@@ -21,6 +22,12 @@ Highlight selected text in Obsidian's reading mode using `==markdown highlight==
    - (Mobile) Tap the highlighter icon in the ribbon
 
 The plugin wraps the selected text with `==highlights==` in the underlying markdown source.
+
+### Undoing a highlight
+
+If you highlight the wrong selection, an **undo button** appears next to the highlight button. Click it to remove the most recent highlight. The button stays visible until you click it, switch to a different note, or the plugin is disabled. You can also run **Undo last highlight** from the command palette (and assign a hotkey to it).
+
+Only the most recent highlight is reversible from inside the plugin. For older highlights, edit the `==` markers directly in source mode.
 
 ## Hotkeys
 

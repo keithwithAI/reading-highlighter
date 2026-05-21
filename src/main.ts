@@ -1,4 +1,4 @@
-import { Plugin, MarkdownView, Notice, Platform, setIcon } from "obsidian";
+import { Plugin, MarkdownView, Notice, Platform, TFile, setIcon } from "obsidian";
 
 interface PositionMapEntry {
   sourceStart: number;
@@ -31,11 +31,20 @@ interface SelectionSnapshot {
   paragraphEnd: number | null;
 }
 
+interface LastHighlightRecord {
+  filePath: string;
+  position: number;
+  originalText: string;
+  highlightedText: string;
+}
+
 type NullablePair = [number | null, number | null];
 
 export default class ReadingHighlighterPlugin extends Plugin {
   floatingButtonEl: HTMLButtonElement | null = null;
+  undoButtonEl: HTMLButtonElement | null = null;
   selectionSnapshot: SelectionSnapshot | null = null;
+  lastHighlight: LastHighlightRecord | null = null;
 
   onload(): void {
     /*── Command palette ──*/
@@ -47,6 +56,20 @@ export default class ReadingHighlighterPlugin extends Plugin {
         if (!view || view.getMode() !== "preview") return false;
         if (checking) return true;
         void this.highlightSelection(view);
+        return true;
+      },
+    });
+
+    this.addCommand({
+      id: "undo-last-highlight-reading",
+      name: "Undo last highlight",
+      checkCallback: (checking: boolean) => {
+        const record = this.lastHighlight;
+        if (!record) return false;
+        const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+        if (!view || view.file?.path !== record.filePath) return false;
+        if (checking) return true;
+        void this.undoLastHighlight();
         return true;
       },
     });
@@ -65,6 +88,7 @@ export default class ReadingHighlighterPlugin extends Plugin {
 
     /*── Floating button ──*/
     this.createFloatingButton();
+    this.createUndoButton();
     this.registerDomEvent(activeDocument, "selectionchange", () =>
       this.handleSelectionChange()
     );
@@ -73,6 +97,12 @@ export default class ReadingHighlighterPlugin extends Plugin {
       this.app.workspace.on("active-leaf-change", () => {
         // Different file/view → any cached selection is stale
         this.selectionSnapshot = null;
+        const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+        const path = view?.file?.path ?? null;
+        if (this.lastHighlight && this.lastHighlight.filePath !== path) {
+          this.lastHighlight = null;
+          this.hideUndoButton();
+        }
         this.handleSelectionChange();
       })
     );
@@ -85,7 +115,12 @@ export default class ReadingHighlighterPlugin extends Plugin {
       this.floatingButtonEl.remove();
       this.floatingButtonEl = null;
     }
+    if (this.undoButtonEl) {
+      this.undoButtonEl.remove();
+      this.undoButtonEl = null;
+    }
     this.selectionSnapshot = null;
+    this.lastHighlight = null;
   }
 
   createFloatingButton(): void {
@@ -170,6 +205,35 @@ export default class ReadingHighlighterPlugin extends Plugin {
     this.floatingButtonEl?.removeClass("is-visible");
   }
 
+  createUndoButton(): void {
+    if (this.undoButtonEl) return;
+
+    this.undoButtonEl = activeDocument.createElement("button");
+    setIcon(this.undoButtonEl, "undo-2");
+    this.undoButtonEl.setAttribute("aria-label", "Undo last highlight");
+    this.undoButtonEl.setAttribute("type", "button");
+    this.undoButtonEl.addClass("reading-highlighter-undo-btn");
+
+    this.registerDomEvent(this.undoButtonEl, "mousedown", (e: MouseEvent) => {
+      e.preventDefault();
+    });
+
+    this.registerDomEvent(this.undoButtonEl, "click", (e: MouseEvent) => {
+      e.preventDefault();
+      void this.undoLastHighlight();
+    });
+
+    activeDocument.body.appendChild(this.undoButtonEl);
+  }
+
+  showUndoButton(): void {
+    this.undoButtonEl?.addClass("is-visible");
+  }
+
+  hideUndoButton(): void {
+    this.undoButtonEl?.removeClass("is-visible");
+  }
+
   /*───────────────── Main logic ─────────────────*/
   async highlightSelection(view: MarkdownView): Promise<void> {
     const file = view.file;
@@ -223,6 +287,9 @@ export default class ReadingHighlighterPlugin extends Plugin {
 
     /* 3. Atomically read + modify the file */
     let found = true;
+    let recordedPosition: number | null = null;
+    let recordedOriginal: string | null = null;
+    let recordedHighlighted: string | null = null;
 
     await this.app.vault.process(file, (raw: string): string => {
       let a_orig: number | null = null;
@@ -287,6 +354,10 @@ export default class ReadingHighlighterPlugin extends Plugin {
       const textToHighlight = raw.slice(currentA, currentB);
       const updatedText = this.addHighlightsByParagraph(textToHighlight);
 
+      recordedPosition = currentA;
+      recordedOriginal = textToHighlight;
+      recordedHighlighted = updatedText;
+
       return raw.slice(0, currentA) + updatedText + raw.slice(currentB);
     });
 
@@ -302,10 +373,88 @@ export default class ReadingHighlighterPlugin extends Plugin {
       window.setTimeout(restore, 50);
     });
 
-    /* 5. Clean up selection + cache */
+    /* 5. Record for undo, then clean up selection + cache */
+    if (
+      recordedPosition != null &&
+      recordedOriginal != null &&
+      recordedHighlighted != null &&
+      recordedOriginal !== recordedHighlighted
+    ) {
+      this.lastHighlight = {
+        filePath: file.path,
+        position: recordedPosition,
+        originalText: recordedOriginal,
+        highlightedText: recordedHighlighted,
+      };
+      this.showUndoButton();
+    }
     sel?.removeAllRanges();
     this.selectionSnapshot = null;
     this.hideFloatingButton();
+  }
+
+  /*────────── Undo last highlight ──────────*/
+  async undoLastHighlight(): Promise<void> {
+    const record = this.lastHighlight;
+    if (!record) {
+      new Notice("Nothing to undo.");
+      return;
+    }
+
+    const abstractFile = this.app.vault.getAbstractFileByPath(record.filePath);
+    if (!(abstractFile instanceof TFile)) {
+      new Notice("Cannot undo — file not found.");
+      this.lastHighlight = null;
+      this.hideUndoButton();
+      return;
+    }
+    const file = abstractFile;
+
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    const scrollBefore =
+      view && view.file?.path === record.filePath ? this.getScroll(view) : null;
+
+    let undone = false;
+    await this.app.vault.process(file, (raw: string): string => {
+      // Fast path: the highlighted span is still at the recorded position.
+      const fastEnd = record.position + record.highlightedText.length;
+      if (
+        record.position >= 0 &&
+        fastEnd <= raw.length &&
+        raw.slice(record.position, fastEnd) === record.highlightedText
+      ) {
+        undone = true;
+        return (
+          raw.slice(0, record.position) +
+          record.originalText +
+          raw.slice(fastEnd)
+        );
+      }
+      // Fallback: the file was edited and the position drifted. Only act if
+      // the exact highlighted span appears once anywhere in the file.
+      const [a, b] = this.uniqueDirectMatch(raw, record.highlightedText);
+      if (a == null || b == null) return raw;
+      undone = true;
+      return raw.slice(0, a) + record.originalText + raw.slice(b);
+    });
+
+    if (!undone) {
+      new Notice("Cannot find that highlight — the file may have changed.");
+      return;
+    }
+
+    this.lastHighlight = null;
+    this.hideUndoButton();
+
+    if (view && scrollBefore != null) {
+      const restore = () => this.applyScroll(view, scrollBefore);
+      window.requestAnimationFrame(() => {
+        restore();
+        window.setTimeout(restore, 50);
+      });
+    }
+
+    new Notice("Highlight undone.");
   }
 
   /*────────── Add highlights by paragraph ──────────*/

@@ -31,3 +31,30 @@
 .reading-highlighter-float-btn.is-visible {
   display: block;
 }
+
+/* Undo highlight button — appears after a highlight is applied. Positioned
+   left of the centered highlight button so the two don't overlap if a new
+   selection brings the highlight button back. */
+.reading-highlighter-undo-btn {
+  position: fixed;
+  bottom: 30px;
+  left: 50%;
+  transform: translateX(calc(-50% - 60px));
+  z-index: var(--layer-popover, 1000);
+  padding: 10px 15px;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+  background-color: var(--background-modifier-border);
+  color: var(--text-normal);
+  display: none;
+
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.reading-highlighter-undo-btn.is-visible {
+  display: block;
+}
