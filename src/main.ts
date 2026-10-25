@@ -1,4 +1,35 @@
-import { Plugin, MarkdownView, Notice, Platform, TFile, setIcon } from "obsidian";
+import {
+  Menu,
+  MarkdownView,
+  Notice,
+  Platform,
+  Plugin,
+  TFile,
+  WorkspaceLeaf,
+  setIcon,
+} from "obsidian";
+import {
+  HighlightSpan,
+  appendFootnoteDefinition,
+  findHighlightSpans,
+  getFootnoteDefinition,
+  insertFootnoteRef,
+  lineOfOffset,
+  locateSpan,
+  matchMarkToSpan,
+  nextFootnoteLabel,
+  removeFootnoteDefinition,
+  removeHighlightSpan,
+  sectionRange,
+  setSpanNote,
+} from "./highlights";
+import { HIGHLIGHTS_VIEW_TYPE, HighlightsView } from "./highlights-view";
+import { NoteModal } from "./note-modal";
+import {
+  DEFAULT_SETTINGS,
+  ReadingHighlighterSettingTab,
+  ReadingHighlighterSettings,
+} from "./settings";
 
 interface PositionMapEntry {
   sourceStart: number;
@@ -24,9 +55,20 @@ interface SourcePosRange {
   end: number;
 }
 
+interface PreviewSection {
+  el: HTMLElement;
+  lines: number;
+}
+
 interface SelectionSnapshot {
   text: string;
   viewPath: string | null;
+  paragraphStart: number | null;
+  paragraphEnd: number | null;
+}
+
+interface ResolvedSelection {
+  snippet: string;
   paragraphStart: number | null;
   paragraphEnd: number | null;
 }
@@ -36,26 +78,66 @@ interface LastHighlightRecord {
   position: number;
   originalText: string;
   highlightedText: string;
+  /** Set when the highlight was created with a note. */
+  footnoteLabel: string | null;
+}
+
+/** Where a highlight was when it was read: its start and its source text. */
+export interface SpanRef {
+  start: number;
+  text: string;
+}
+
+export interface HighlightEntry {
+  ref: SpanRef;
+  /** Rendered text, without markdown syntax. */
+  text: string;
+  note: string | null;
+  /** Zero-based line of the highlight in the note. */
+  line: number;
 }
 
 type NullablePair = [number | null, number | null];
 
 export default class ReadingHighlighterPlugin extends Plugin {
-  floatingButtonEl: HTMLButtonElement | null = null;
+  settings: ReadingHighlighterSettings = { ...DEFAULT_SETTINGS };
+  toolbarEl: HTMLDivElement | null = null;
+  bottomBarEl: HTMLDivElement | null = null;
   undoButtonEl: HTMLButtonElement | null = null;
   selectionSnapshot: SelectionSnapshot | null = null;
   lastHighlight: LastHighlightRecord | null = null;
+  panelRefreshTimer: number | null = null;
+  markClickTimer: number | null = null;
 
-  onload(): void {
+  async onload(): Promise<void> {
+    await this.loadSettings();
+    this.addSettingTab(new ReadingHighlighterSettingTab(this.app, this));
+    this.registerView(
+      HIGHLIGHTS_VIEW_TYPE,
+      (leaf: WorkspaceLeaf) => new HighlightsView(leaf, this)
+    );
+
     /*── Command palette ──*/
     this.addCommand({
       id: "highlight-selection-reading",
       name: "Highlight selection in reading mode",
       checkCallback: (checking: boolean) => {
-        const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-        if (!view || view.getMode() !== "preview") return false;
+        const view = this.getReadingView();
+        if (!view) return false;
         if (checking) return true;
         void this.highlightSelection(view);
+        return true;
+      },
+    });
+
+    this.addCommand({
+      id: "add-note-to-selection",
+      name: "Highlight selection with a note",
+      checkCallback: (checking: boolean) => {
+        const view = this.getReadingView();
+        if (!view) return false;
+        if (checking) return true;
+        this.noteSelection(view);
         return true;
       },
     });
@@ -74,11 +156,17 @@ export default class ReadingHighlighterPlugin extends Plugin {
       },
     });
 
+    this.addCommand({
+      id: "open-highlights-panel",
+      name: "Open highlights panel",
+      callback: () => void this.activatePanel(),
+    });
+
     /*── Ribbon icon (mobile only) ──*/
     if (Platform.isMobile) {
       this.addRibbonIcon("highlighter", "Highlight selection", () => {
-        const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-        if (view && view.getMode() === "preview") {
+        const view = this.getReadingView();
+        if (view) {
           void this.highlightSelection(view);
         } else {
           new Notice("Open the note in reading mode first.");
@@ -86,11 +174,25 @@ export default class ReadingHighlighterPlugin extends Plugin {
       });
     }
 
-    /*── Floating button ──*/
-    this.createFloatingButton();
+    /*── Toolbar + bottom bar ──*/
+    this.createBottomBar();
     this.createUndoButton();
+    this.createToolbar();
+    this.applyToolbarPlacement();
     this.registerDomEvent(activeDocument, "selectionchange", () =>
       this.handleSelectionChange()
+    );
+    // Keep the toolbar attached to the selection while the note scrolls.
+    this.registerDomEvent(
+      activeDocument,
+      "scroll",
+      () => {
+        if (this.toolbarEl?.hasClass("is-visible")) this.handleSelectionChange();
+      },
+      { capture: true, passive: true }
+    );
+    this.registerDomEvent(activeDocument, "click", (evt: MouseEvent) =>
+      this.handleReadingClick(evt)
     );
 
     this.registerEvent(
@@ -104,6 +206,18 @@ export default class ReadingHighlighterPlugin extends Plugin {
           this.hideUndoButton();
         }
         this.handleSelectionChange();
+        this.followActiveFile();
+      })
+    );
+    this.registerEvent(
+      this.app.workspace.on("file-open", () => this.followActiveFile())
+    );
+    this.registerEvent(
+      this.app.vault.on("modify", (file) => {
+        if (!(file instanceof TFile)) return;
+        if (this.getPanels().some((p) => p.showsFile(file.path))) {
+          this.schedulePanelRefresh();
+        }
       })
     );
     // Initial check in case a selection exists when the plugin loads
@@ -111,50 +225,105 @@ export default class ReadingHighlighterPlugin extends Plugin {
   }
 
   onunload(): void {
-    if (this.floatingButtonEl) {
-      this.floatingButtonEl.remove();
-      this.floatingButtonEl = null;
-    }
-    if (this.undoButtonEl) {
-      this.undoButtonEl.remove();
-      this.undoButtonEl = null;
-    }
+    this.toolbarEl?.remove();
+    this.toolbarEl = null;
+    this.bottomBarEl?.remove();
+    this.bottomBarEl = null;
+    this.undoButtonEl = null;
+    if (this.panelRefreshTimer != null) window.clearTimeout(this.panelRefreshTimer);
+    if (this.markClickTimer != null) window.clearTimeout(this.markClickTimer);
     this.selectionSnapshot = null;
     this.lastHighlight = null;
   }
 
-  createFloatingButton(): void {
-    if (this.floatingButtonEl) return;
+  async loadSettings(): Promise<void> {
+    this.settings = Object.assign(
+      {},
+      DEFAULT_SETTINGS,
+      (await this.loadData()) as Partial<ReadingHighlighterSettings> | null
+    );
+  }
 
-    this.floatingButtonEl = activeDocument.createElement("button");
-    setIcon(this.floatingButtonEl, "highlighter");
-    this.floatingButtonEl.setAttribute("aria-label", "Highlight selection");
-    this.floatingButtonEl.setAttribute("type", "button");
-    this.floatingButtonEl.addClass("reading-highlighter-float-btn");
+  async saveSettings(): Promise<void> {
+    await this.saveData(this.settings);
+  }
+
+  getReadingView(): MarkdownView | null {
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    return view && view.getMode() === "preview" ? view : null;
+  }
+
+  /*────────── Toolbar ──────────*/
+  createBottomBar(): void {
+    if (this.bottomBarEl) return;
+    this.bottomBarEl = activeDocument.body.createDiv({
+      cls: "reading-highlighter-bottom-bar",
+    });
+  }
+
+  createToolbar(): void {
+    if (this.toolbarEl) return;
+    const bar = activeDocument.body.createDiv({ cls: "reading-highlighter-toolbar" });
+    this.addToolbarButton(bar, "highlighter", "Highlight", () => {
+      const view = this.getReadingView();
+      if (view) void this.highlightSelection(view);
+      this.hideToolbar();
+    });
+    this.addToolbarButton(bar, "message-square-plus", "Highlight with note", () => {
+      const view = this.getReadingView();
+      if (view) this.noteSelection(view);
+      this.hideToolbar();
+    });
+    this.addToolbarButton(bar, "copy", "Copy", () => {
+      const view = this.getReadingView();
+      const resolved = view ? this.resolveSelection(view) : null;
+      if (resolved) void this.copyText(resolved.snippet);
+    });
+    this.toolbarEl = bar;
+  }
+
+  addToolbarButton(
+    parent: HTMLElement,
+    icon: string,
+    label: string,
+    onClick: () => void
+  ): void {
+    const btn = parent.createEl("button", {
+      cls: "reading-highlighter-toolbar-btn",
+      attr: { type: "button", "aria-label": label },
+    });
+    setIcon(btn, icon);
 
     // mousedown default = focus the button, which collapses the text
     // selection in most browsers. Preventing it keeps the selection alive
     // until the click handler reads it.
-    this.registerDomEvent(this.floatingButtonEl, "mousedown", (e: MouseEvent) => {
+    this.registerDomEvent(btn, "mousedown", (e: MouseEvent) => {
       e.preventDefault();
     });
-
-    this.registerDomEvent(this.floatingButtonEl, "click", (e: MouseEvent) => {
+    this.registerDomEvent(btn, "click", (e: MouseEvent) => {
       e.preventDefault();
-      const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-      if (view && view.getMode() === "preview") {
-        void this.highlightSelection(view);
-      }
-      this.hideFloatingButton();
+      onClick();
     });
+  }
 
-    activeDocument.body.appendChild(this.floatingButtonEl);
+  /** Dock the toolbar in the bottom bar, or float it next to the selection. */
+  applyToolbarPlacement(): void {
+    const bar = this.toolbarEl;
+    if (!bar || !this.bottomBarEl) return;
+    if (this.settings.toolbarPlacement === "bottom") {
+      this.bottomBarEl.appendChild(bar);
+      bar.addClass("is-docked");
+    } else {
+      activeDocument.body.appendChild(bar);
+      bar.removeClass("is-docked");
+    }
+    this.handleSelectionChange();
   }
 
   handleSelectionChange(): void {
-    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-    if (!view || view.getMode() !== "preview") {
-      this.hideFloatingButton();
+    const view = this.getReadingView();
+    if (!view) {
+      this.hideToolbar();
       return;
     }
 
@@ -186,33 +355,63 @@ export default class ReadingHighlighterPlugin extends Plugin {
           paragraphStart,
           paragraphEnd,
         };
-        this.showFloatingButton();
+        this.showToolbar(sel.getRangeAt(0), previewEl);
         return;
       }
     }
 
-    // Selection is collapsed / empty / outside the preview. Hide the button,
+    // Selection is collapsed / empty / outside the preview. Hide the toolbar,
     // but keep the most recent snapshot: tapping a button can collapse the
     // selection as a side effect and we still want that tap to succeed.
-    this.hideFloatingButton();
+    this.hideToolbar();
   }
 
-  showFloatingButton(): void {
-    this.floatingButtonEl?.addClass("is-visible");
+  showToolbar(range: Range, previewEl: Element): void {
+    const bar = this.toolbarEl;
+    if (!bar) return;
+    bar.addClass("is-visible");
+    if (this.settings.toolbarPlacement === "bottom") return;
+
+    const rect = range.getBoundingClientRect();
+    const bounds = previewEl.getBoundingClientRect();
+    // Selection scrolled out of view: nothing to point at.
+    if (rect.bottom < bounds.top || rect.top > bounds.bottom) {
+      this.hideToolbar();
+      return;
+    }
+
+    const margin = 8;
+    // The iOS callout usually sits above the selection, so go below it, far
+    // enough down to clear the selection's drag handle.
+    const gap = Platform.isMobile ? 36 : 10;
+    const w = bar.offsetWidth;
+    const h = bar.offsetHeight;
+
+    let top = rect.bottom + gap;
+    if (top + h > bounds.bottom - margin) top = rect.top - h - gap;
+    top = Math.max(bounds.top + margin, Math.min(top, bounds.bottom - h - margin));
+
+    let left = rect.left + rect.width / 2 - w / 2;
+    left = Math.max(bounds.left + margin, Math.min(left, bounds.right - w - margin));
+
+    bar.setCssProps({
+      "--reading-highlighter-toolbar-top": `${Math.round(top)}px`,
+      "--reading-highlighter-toolbar-left": `${Math.round(left)}px`,
+    });
   }
 
-  hideFloatingButton(): void {
-    this.floatingButtonEl?.removeClass("is-visible");
+  hideToolbar(): void {
+    this.toolbarEl?.removeClass("is-visible");
   }
 
   createUndoButton(): void {
-    if (this.undoButtonEl) return;
+    if (this.undoButtonEl || !this.bottomBarEl) return;
 
-    this.undoButtonEl = activeDocument.createElement("button");
+    this.undoButtonEl = this.bottomBarEl.createEl("button", {
+      cls: "reading-highlighter-undo-btn",
+      attr: { type: "button", "aria-label": "Undo last highlight" },
+    });
     setIcon(this.undoButtonEl, "undo-2");
-    this.undoButtonEl.setAttribute("aria-label", "Undo last highlight");
-    this.undoButtonEl.setAttribute("type", "button");
-    this.undoButtonEl.addClass("reading-highlighter-undo-btn");
 
     this.registerDomEvent(this.undoButtonEl, "mousedown", (e: MouseEvent) => {
       e.preventDefault();
@@ -222,8 +421,6 @@ export default class ReadingHighlighterPlugin extends Plugin {
       e.preventDefault();
       void this.undoLastHighlight();
     });
-
-    activeDocument.body.appendChild(this.undoButtonEl);
   }
 
   showUndoButton(): void {
@@ -234,12 +431,40 @@ export default class ReadingHighlighterPlugin extends Plugin {
     this.undoButtonEl?.removeClass("is-visible");
   }
 
+  async copyText(text: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(text);
+      new Notice("Copied.");
+    } catch {
+      new Notice("Couldn't copy to the clipboard.");
+    }
+  }
+
   /*───────────────── Main logic ─────────────────*/
   async highlightSelection(view: MarkdownView): Promise<void> {
-    const file = view.file;
-    if (!file) return;
+    const resolved = this.resolveSelection(view);
+    if (resolved) await this.applyHighlight(view, resolved);
+  }
 
-    /* 1. Pick a selection: live if it's still there, otherwise the snapshot */
+  /** Capture the selection, then ask for a note before highlighting. */
+  noteSelection(view: MarkdownView): void {
+    // Resolve now: opening the modal clears the selection on iOS.
+    const resolved = this.resolveSelection(view);
+    if (!resolved) return;
+    this.hideToolbar();
+    new NoteModal(this.app, {
+      title: "Add note",
+      quote: resolved.snippet.trim(),
+      initialText: "",
+      onSave: (text) => void this.applyHighlight(view, resolved, text),
+    }).open();
+  }
+
+  /** Pick a selection: live if it's still there, otherwise the snapshot. */
+  resolveSelection(view: MarkdownView): ResolvedSelection | null {
+    const file = view.file;
+    if (!file) return null;
+
     const sel = activeDocument.getSelection();
     const liveSnippet = sel?.toString() ?? "";
     const previewEl = this.getPreviewEl(view);
@@ -274,22 +499,36 @@ export default class ReadingHighlighterPlugin extends Plugin {
       paragraphEnd = this.selectionSnapshot.paragraphEnd;
     } else {
       new Notice("Select text first — nothing selected.");
-      return;
+      return null;
     }
 
     if (!snippet.trim()) {
       new Notice("Select text first — nothing selected.");
-      return;
+      return null;
     }
 
-    /* 2. Save scroll position */
+    return { snippet, paragraphStart, paragraphEnd };
+  }
+
+  async applyHighlight(
+    view: MarkdownView,
+    resolved: ResolvedSelection,
+    note?: string
+  ): Promise<void> {
+    const file = view.file;
+    if (!file) return;
+    const { snippet, paragraphStart, paragraphEnd } = resolved;
+    const noteText = note?.trim() ?? "";
+
+    /* 1. Save scroll position */
     const scrollBefore = this.getScroll(view);
 
-    /* 3. Atomically read + modify the file */
+    /* 2. Atomically read + modify the file */
     let found = true;
     let recordedPosition: number | null = null;
     let recordedOriginal: string | null = null;
     let recordedHighlighted: string | null = null;
+    let recordedLabel: string | null = null;
 
     await this.app.vault.process(file, (raw: string): string => {
       let a_orig: number | null = null;
@@ -352,13 +591,17 @@ export default class ReadingHighlighterPlugin extends Plugin {
       }
 
       const textToHighlight = raw.slice(currentA, currentB);
-      const updatedText = this.addHighlightsByParagraph(textToHighlight);
+      let updatedText = this.addHighlightsByParagraph(textToHighlight);
+      const label = noteText ? nextFootnoteLabel(raw) : null;
+      if (label) updatedText = insertFootnoteRef(updatedText, label);
 
       recordedPosition = currentA;
       recordedOriginal = textToHighlight;
       recordedHighlighted = updatedText;
+      recordedLabel = label;
 
-      return raw.slice(0, currentA) + updatedText + raw.slice(currentB);
+      const result = raw.slice(0, currentA) + updatedText + raw.slice(currentB);
+      return label ? appendFootnoteDefinition(result, label, noteText) : result;
     });
 
     if (!found) {
@@ -366,14 +609,10 @@ export default class ReadingHighlighterPlugin extends Plugin {
       return;
     }
 
-    /* 4. Restore scroll — two passes because rendering can finish late */
-    const restore = () => this.applyScroll(view, scrollBefore);
-    window.requestAnimationFrame(() => {
-      restore();
-      window.setTimeout(restore, 50);
-    });
+    /* 3. Restore scroll */
+    this.restoreScroll(view, scrollBefore);
 
-    /* 5. Record for undo, then clean up selection + cache */
+    /* 4. Record for undo, then clean up selection + cache */
     if (
       recordedPosition != null &&
       recordedOriginal != null &&
@@ -385,12 +624,13 @@ export default class ReadingHighlighterPlugin extends Plugin {
         position: recordedPosition,
         originalText: recordedOriginal,
         highlightedText: recordedHighlighted,
+        footnoteLabel: recordedLabel,
       };
       this.showUndoButton();
     }
-    sel?.removeAllRanges();
+    activeDocument.getSelection()?.removeAllRanges();
     this.selectionSnapshot = null;
-    this.hideFloatingButton();
+    this.hideToolbar();
   }
 
   /*────────── Undo last highlight ──────────*/
@@ -416,6 +656,10 @@ export default class ReadingHighlighterPlugin extends Plugin {
 
     let undone = false;
     await this.app.vault.process(file, (raw: string): string => {
+      const dropNote = (text: string) =>
+        record.footnoteLabel
+          ? removeFootnoteDefinition(text, record.footnoteLabel)
+          : text;
       // Fast path: the highlighted span is still at the recorded position.
       const fastEnd = record.position + record.highlightedText.length;
       if (
@@ -424,10 +668,10 @@ export default class ReadingHighlighterPlugin extends Plugin {
         raw.slice(record.position, fastEnd) === record.highlightedText
       ) {
         undone = true;
-        return (
+        return dropNote(
           raw.slice(0, record.position) +
-          record.originalText +
-          raw.slice(fastEnd)
+            record.originalText +
+            raw.slice(fastEnd)
         );
       }
       // Fallback: the file was edited and the position drifted. Only act if
@@ -435,7 +679,7 @@ export default class ReadingHighlighterPlugin extends Plugin {
       const [a, b] = this.uniqueDirectMatch(raw, record.highlightedText);
       if (a == null || b == null) return raw;
       undone = true;
-      return raw.slice(0, a) + record.originalText + raw.slice(b);
+      return dropNote(raw.slice(0, a) + record.originalText + raw.slice(b));
     });
 
     if (!undone) {
@@ -446,15 +690,250 @@ export default class ReadingHighlighterPlugin extends Plugin {
     this.lastHighlight = null;
     this.hideUndoButton();
 
-    if (view && scrollBefore != null) {
-      const restore = () => this.applyScroll(view, scrollBefore);
-      window.requestAnimationFrame(() => {
-        restore();
-        window.setTimeout(restore, 50);
-      });
-    }
+    if (view && scrollBefore != null) this.restoreScroll(view, scrollBefore);
 
     new Notice("Highlight undone.");
+  }
+
+  /*────────── Existing highlights: tap menu + note editing ──────────*/
+  handleReadingClick(evt: MouseEvent): void {
+    const target = evt.target;
+    if (!(target instanceof Element)) return;
+    const mark = target.closest("mark");
+    if (!mark || target.closest("a, sup")) return;
+
+    const view = this.getReadingView();
+    const file = view?.file;
+    const previewEl = view ? this.getPreviewEl(view) : null;
+    if (!view || !file || !previewEl?.contains(mark)) return;
+
+    if (this.markClickTimer != null) {
+      window.clearTimeout(this.markClickTimer);
+      this.markClickTimer = null;
+    }
+    // Double/triple click selects words; leave that alone.
+    if (evt.detail > 1) return;
+
+    const open = () => {
+      // A click that ends a drag-selection is not a tap on the highlight.
+      const sel = activeDocument.getSelection();
+      if (sel && !sel.isCollapsed && sel.toString().trim()) return;
+
+      const raw = view.getViewData();
+      const span = this.spanForMark(raw, mark);
+      if (!span) {
+        new Notice("Couldn't match this highlight to the note's text.");
+        return;
+      }
+      this.openHighlightMenu(file, this.entryForSpan(raw, span), evt);
+    };
+
+    // With a mouse, wait to see whether this click starts a double-click.
+    if (Platform.isMobile) {
+      open();
+    } else {
+      this.markClickTimer = window.setTimeout(() => {
+        this.markClickTimer = null;
+        open();
+      }, 250);
+    }
+  }
+
+  /** Map a rendered `<mark>` in the active reading view to its source span. */
+  spanForMark(raw: string, mark: Element): HighlightSpan | null {
+    const block = this.sourcePosElement(mark);
+    const window = this.sourcePosRangeForNode(mark);
+    let indexInBlock = 0;
+    if (block) {
+      const marks = Array.from(block.querySelectorAll("mark")).filter(
+        (m) => this.sourcePosElement(m) === block
+      );
+      indexInBlock = Math.max(0, marks.indexOf(mark as HTMLElement));
+    }
+    return matchMarkToSpan(
+      findHighlightSpans(raw),
+      {
+        text: this.typographyDenormalize(mark.textContent ?? ""),
+        indexInBlock,
+        window,
+      },
+      (inner) => this.renderInline(inner)
+    );
+  }
+
+  renderInline(markdown: string): string {
+    return this.typographyDenormalize(this.createPositionMap(markdown).renderedText);
+  }
+
+  entryForSpan(raw: string, span: HighlightSpan): HighlightEntry {
+    return {
+      ref: { start: span.start, text: raw.slice(span.start, span.refEnd) },
+      text: this.renderInline(span.inner),
+      note: span.footnoteLabel ? getFootnoteDefinition(raw, span.footnoteLabel) : null,
+      line: lineOfOffset(raw, span.start),
+    };
+  }
+
+  async getHighlightEntries(file: TFile): Promise<HighlightEntry[]> {
+    const raw = await this.app.vault.cachedRead(file);
+    return findHighlightSpans(raw).map((span) => this.entryForSpan(raw, span));
+  }
+
+  openHighlightMenu(file: TFile, entry: HighlightEntry, evt: MouseEvent): void {
+    const menu = new Menu();
+    menu.addItem((item) =>
+      item
+        .setTitle(entry.note != null ? "Edit note" : "Add note")
+        .setIcon("message-square")
+        .onClick(() => void this.editNote(file, entry))
+    );
+    menu.addItem((item) =>
+      item
+        .setTitle("Copy")
+        .setIcon("copy")
+        .onClick(() => void this.copyText(entry.text))
+    );
+    menu.addItem((item) =>
+      item
+        .setTitle("Remove highlight")
+        .setIcon("eraser")
+        .onClick(() => void this.updateSpan(file, entry.ref, removeHighlightSpan))
+    );
+    menu.showAtMouseEvent(evt);
+  }
+
+  async editNote(file: TFile, entry: HighlightEntry): Promise<void> {
+    const raw = await this.app.vault.read(file);
+    const span = this.resolveSpan(raw, entry.ref);
+    if (!span) {
+      new Notice("Cannot find that highlight — the file may have changed.");
+      return;
+    }
+    const existing = span.footnoteLabel
+      ? getFootnoteDefinition(raw, span.footnoteLabel)
+      : null;
+    const ref = { start: span.start, text: raw.slice(span.start, span.refEnd) };
+    const save = (text: string) =>
+      void this.updateSpan(file, ref, (r, s) => setSpanNote(r, s, text));
+
+    new NoteModal(this.app, {
+      title: existing != null ? "Edit note" : "Add note",
+      quote: entry.text,
+      initialText: existing ?? "",
+      onSave: save,
+      onDelete: existing != null ? () => save("") : undefined,
+    }).open();
+  }
+
+  /** Find the span a ref points at in the current text, if it is still there. */
+  resolveSpan(raw: string, ref: SpanRef): HighlightSpan | null {
+    const start = locateSpan(raw, ref);
+    if (start == null) return null;
+    return findHighlightSpans(raw).find((s) => s.start === start) ?? null;
+  }
+
+  /** Rewrite one highlight in place, keeping the reading position. */
+  async updateSpan(
+    file: TFile,
+    ref: SpanRef,
+    edit: (raw: string, span: HighlightSpan) => string
+  ): Promise<void> {
+    const view = this.viewForFile(file);
+    const scrollBefore = view?.getMode() === "preview" ? this.getScroll(view) : null;
+
+    let applied = false;
+    await this.app.vault.process(file, (raw: string): string => {
+      const span = this.resolveSpan(raw, ref);
+      if (!span) return raw;
+      applied = true;
+      return edit(raw, span);
+    });
+
+    if (!applied) {
+      new Notice("Cannot find that highlight — the file may have changed.");
+      return;
+    }
+    if (view && scrollBefore != null) this.restoreScroll(view, scrollBefore);
+  }
+
+  viewForFile(file: TFile): MarkdownView | null {
+    const active = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (active?.file?.path === file.path) return active;
+    for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+      if (leaf.view instanceof MarkdownView && leaf.view.file?.path === file.path) {
+        return leaf.view;
+      }
+    }
+    return null;
+  }
+
+  /*────────── Highlights panel ──────────*/
+  getPanels(): HighlightsView[] {
+    return this.app.workspace
+      .getLeavesOfType(HIGHLIGHTS_VIEW_TYPE)
+      .map((leaf) => leaf.view)
+      .filter((view): view is HighlightsView => view instanceof HighlightsView);
+  }
+
+  async activatePanel(): Promise<void> {
+    const { workspace } = this.app;
+    let leaf: WorkspaceLeaf | null = workspace.getLeavesOfType(HIGHLIGHTS_VIEW_TYPE)[0] ?? null;
+    if (!leaf) {
+      leaf = workspace.getRightLeaf(false);
+      if (!leaf) return;
+      await leaf.setViewState({ type: HIGHLIGHTS_VIEW_TYPE, active: true });
+    }
+    // revealLeaf needs 1.7.2; expanding the sidebar and focusing the leaf
+    // does the same on older versions.
+    workspace.rightSplit.expand();
+    workspace.setActiveLeaf(leaf, { focus: true });
+  }
+
+  followActiveFile(): void {
+    const file = this.app.workspace.getActiveFile();
+    for (const panel of this.getPanels()) void panel.setFile(file);
+  }
+
+  schedulePanelRefresh(): void {
+    if (this.panelRefreshTimer != null) window.clearTimeout(this.panelRefreshTimer);
+    this.panelRefreshTimer = window.setTimeout(() => {
+      this.panelRefreshTimer = null;
+      for (const panel of this.getPanels()) void panel.refresh();
+    }, 300);
+  }
+
+  async jumpToHighlight(file: TFile, entry: HighlightEntry): Promise<void> {
+    const { workspace } = this.app;
+    let view = this.viewForFile(file);
+    if (!view) {
+      const leaf = workspace.getLeaf(false);
+      await leaf.openFile(file);
+      view = leaf.view instanceof MarkdownView ? leaf.view : null;
+      if (!view) return;
+    }
+    // On phones the panel is a drawer covering the note.
+    if (Platform.isMobile) workspace.rightSplit.collapse();
+    workspace.setActiveLeaf(view.leaf, { focus: true });
+    view.setEphemeralState({ line: entry.line });
+
+    const target = view;
+    // Reading view renders sections lazily; give it a moment to draw.
+    window.setTimeout(() => this.flashHighlight(target, entry), 350);
+  }
+
+  flashHighlight(view: MarkdownView, entry: HighlightEntry): void {
+    if (view.getMode() !== "preview") return;
+    const previewEl = this.getPreviewEl(view);
+    if (!previewEl) return;
+    const raw = view.getViewData();
+    const target = this.resolveSpan(raw, entry.ref);
+    if (!target) return;
+    for (const mark of Array.from(previewEl.querySelectorAll("mark"))) {
+      if (this.spanForMark(raw, mark)?.start !== target.start) continue;
+      mark.addClass("reading-highlighter-flash");
+      window.setTimeout(() => mark.removeClass("reading-highlighter-flash"), 1200);
+      return;
+    }
   }
 
   /*────────── Add highlights by paragraph ──────────*/
@@ -537,26 +1016,27 @@ export default class ReadingHighlighterPlugin extends Plugin {
     view.previewMode.applyScroll(pos);
   }
 
+  /** Restore scroll after a rewrite, in two passes because rendering can finish late. */
+  restoreScroll(view: MarkdownView, pos: number): void {
+    const restore = () => this.applyScroll(view, pos);
+    window.requestAnimationFrame(() => {
+      restore();
+      window.setTimeout(restore, 50);
+    });
+  }
+
   /*────────── Position helpers ──────────*/
   /**
    * Resolve the source-markdown byte range for the markdown block
    * (paragraph / heading / list item / …) containing `node`. Obsidian
    * annotates blocks with `data-sourcepos="line:col-line:col"` (1-indexed,
-   * end column is the last character). Returns null if no ancestor within
-   * 10 levels carries sourcepos metadata.
+   * end column is the last character). Newer versions drop that attribute,
+   * so fall back to the reading view's sections. Returns null if neither
+   * gives a range.
    */
   sourcePosRangeForNode(node: Node | null): SourcePosRange | null {
-    if (!node) return null;
-    let el: HTMLElement | null =
-      node.nodeType === Node.TEXT_NODE
-        ? (node as Text).parentElement
-        : (node as HTMLElement);
-    let count = 0;
-    while (el && !el.getAttribute("data-sourcepos") && count < 10) {
-      el = el.parentElement;
-      count++;
-    }
-    if (!el) return null;
+    const el = this.dataSourcePosElement(node);
+    if (!el) return this.sectionRangeForNode(node);
     const attr = el.getAttribute("data-sourcepos");
     if (!attr) return null;
 
@@ -580,6 +1060,62 @@ export default class ReadingHighlighterPlugin extends Plugin {
     if (end <= startOffset) return null;
 
     return { start: startOffset, end };
+  }
+
+  /** The block element for `node`: its `data-sourcepos` ancestor, else its reading-view section. */
+  sourcePosElement(node: Node | null): HTMLElement | null {
+    const el = this.dataSourcePosElement(node);
+    if (el) return el;
+    const sections = this.previewSections();
+    const index = this.sectionIndexForNode(sections, node);
+    return sections && index !== -1 ? sections[index].el : null;
+  }
+
+  /**
+   * Reading-view sections in source order (internal API: each has its
+   * element and the number of source lines it covers). Null when the
+   * shape isn't what we expect.
+   */
+  previewSections(): PreviewSection[] | null {
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    const renderer = (view?.previewMode as unknown as { renderer?: { sections?: unknown } })
+      ?.renderer;
+    const sections = renderer?.sections;
+    if (!Array.isArray(sections)) return null;
+    const valid = sections.every(
+      (s: Partial<PreviewSection> | null) =>
+        s != null && s.el instanceof HTMLElement && typeof s.lines === "number"
+    );
+    return valid ? (sections as PreviewSection[]) : null;
+  }
+
+  sectionIndexForNode(sections: PreviewSection[] | null, node: Node | null): number {
+    if (!sections || !node) return -1;
+    return sections.findIndex((s) => s.el.contains(node));
+  }
+
+  sectionRangeForNode(node: Node | null): SourcePosRange | null {
+    const sections = this.previewSections();
+    const index = this.sectionIndexForNode(sections, node);
+    if (!sections || index === -1) return null;
+    const viewData = this.app.workspace.getActiveViewOfType(MarkdownView)?.getViewData();
+    if (!viewData) return null;
+    return sectionRange(viewData, sections.map((s) => s.lines), index);
+  }
+
+  /** Nearest ancestor (within 10 levels) carrying `data-sourcepos`. */
+  dataSourcePosElement(node: Node | null): HTMLElement | null {
+    if (!node) return null;
+    let el: HTMLElement | null =
+      node.nodeType === Node.TEXT_NODE
+        ? (node as Text).parentElement
+        : (node as HTMLElement);
+    let count = 0;
+    while (el && !el.getAttribute("data-sourcepos") && count < 10) {
+      el = el.parentElement;
+      count++;
+    }
+    return el && el.getAttribute("data-sourcepos") ? el : null;
   }
 
   lineColToOffset(lines: string[], lineCol: string): number | null {
